@@ -140,6 +140,7 @@ type detailData struct {
 
 	HasCert  bool
 	CertDays int64
+	CertWarn bool
 
 	HasChart    bool
 	ChartWidth  int
@@ -174,6 +175,9 @@ func (s *server) detailData(t config.Target) (detailData, error) {
 		if !last.CertExpiresAt.IsZero() {
 			d.HasCert = true
 			d.CertDays = int64(math.Floor(time.Until(last.CertExpiresAt).Hours() / 24))
+			// Less than 30 days left gets the amber treatment. The threshold
+			// lives here, not in the template.
+			d.CertWarn = d.CertDays < 30
 		}
 	}
 

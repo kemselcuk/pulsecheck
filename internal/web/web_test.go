@@ -130,6 +130,20 @@ func TestIndexHasDetailsLink(t *testing.T) {
 	}
 }
 
+// TestIndexShowsUptimeAndCert pins the dashboard's second stats line: the
+// cards are built client-side, so the field references and the warn class live
+// in the page's script.
+func TestIndexShowsUptimeAndCert(t *testing.T) {
+	srv := newServer(t, config.Config{Targets: []config.Target{target("alpha", "https://alpha.example/health")}}, newStore(t))
+
+	_, _, body := get(t, srv, "/")
+	for _, marker := range []string{"uptime_24h", "uptime_7d", "cert_expires_at", `"warn"`} {
+		if !strings.Contains(body, marker) {
+			t.Errorf("dashboard does not contain %q", marker)
+		}
+	}
+}
+
 func TestOtherPathsAreNotFound(t *testing.T) {
 	srv := newServer(t, config.Config{}, newStore(t))
 
@@ -160,8 +174,9 @@ func TestNoExternalResources(t *testing.T) {
 // --- detail page tests -------------------------------------------------------
 
 // TestDetailPageChart seeds a hand-computed mix and asserts the rendered detail
-// page: the badge, the uptime figures, the certificate line, and an SVG
-// sparkline with exactly one point per stored result.
+// page: the badge, the uptime figures, the certificate line (amber, because
+// the seeded certificate is under 30 days away), and an SVG sparkline with
+// exactly one point per stored result.
 func TestDetailPageChart(t *testing.T) {
 	st := newStore(t)
 	cfg := config.Config{Targets: []config.Target{target("alpha", "https://alpha.example/health")}}
@@ -191,6 +206,7 @@ func TestDetailPageChart(t *testing.T) {
 		"50.0%",
 		"cert expires in:",
 		"2 days",
+		`class="warn"`,
 		`href="/"`,
 	} {
 		if !strings.Contains(body, marker) {
@@ -217,6 +233,39 @@ func TestDetailPageChart(t *testing.T) {
 	}
 
 	assertSelfContained(t, "detail", body)
+}
+
+// TestDetailPageCertWarningThreshold pins the amber treatment: a certificate
+// with fewer than 30 days left carries the warn class, a distant one does not.
+func TestDetailPageCertWarningThreshold(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		expires time.Duration
+		want    bool
+	}{
+		{"under threshold", 20 * 24 * time.Hour, true},
+		{"over threshold", 100 * 24 * time.Hour, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := newStore(t)
+			cfg := config.Config{Targets: []config.Target{target("alpha", "https://alpha.example/health")}}
+			seed(t, st, "alpha", time.Minute, checker.Result{
+				Outcome: checker.OutcomeUp, StatusCode: 200, CertExpiresAt: time.Now().Add(tc.expires),
+			})
+
+			srv := newServer(t, cfg, st)
+			status, _, body := get(t, srv, "/targets/alpha")
+			if status != http.StatusOK {
+				t.Fatalf("status = %d, want 200", status)
+			}
+			if !strings.Contains(body, "cert expires in:") {
+				t.Fatalf("detail page lost the certificate line\n---\n%s", body)
+			}
+			if got := strings.Contains(body, `class="warn"`); got != tc.want {
+				t.Errorf("warn class present = %v, want %v (cert %s away)", got, tc.want, tc.expires)
+			}
+		})
+	}
 }
 
 // TestDetailPageCapsChartPoints pins the up-to-200 window.

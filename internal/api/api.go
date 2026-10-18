@@ -72,6 +72,10 @@ type resultView struct {
 	DurationMs int64  `json:"duration_ms"`
 	At         string `json:"at"`
 	Error      string `json:"error"`
+	// CertExpiresAt is the leaf TLS certificate's expiry (RFC3339 UTC), or null
+	// when no TLS handshake completed (plain HTTP, or a check that never got a
+	// response). It carries the store's NULL semantic to clients.
+	CertExpiresAt *string `json:"cert_expires_at"`
 }
 
 // statsView mirrors store.Stats in snake_case JSON.
@@ -335,13 +339,18 @@ func historyLimit(raw string) int {
 
 // newResultView converts a stored result into its JSON representation.
 func newResultView(r checker.Result) resultView {
-	return resultView{
+	v := resultView{
 		Outcome:    string(r.Outcome),
 		StatusCode: r.StatusCode,
 		DurationMs: r.Duration.Milliseconds(),
 		At:         r.StartedAt.UTC().Format(time.RFC3339),
 		Error:      r.Err,
 	}
+	if !r.CertExpiresAt.IsZero() {
+		cert := r.CertExpiresAt.UTC().Format(time.RFC3339)
+		v.CertExpiresAt = &cert
+	}
+	return v
 }
 
 // writeJSON writes v as compact JSON with the given status code.

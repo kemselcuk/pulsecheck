@@ -104,11 +104,12 @@ type jsonStatus struct {
 }
 
 type jsonResult struct {
-	Outcome    string `json:"outcome"`
-	StatusCode int    `json:"status_code"`
-	DurationMs int64  `json:"duration_ms"`
-	At         string `json:"at"`
-	Error      string `json:"error"`
+	Outcome       string  `json:"outcome"`
+	StatusCode    int     `json:"status_code"`
+	DurationMs    int64   `json:"duration_ms"`
+	At            string  `json:"at"`
+	Error         string  `json:"error"`
+	CertExpiresAt *string `json:"cert_expires_at"`
 }
 
 type jsonStats struct {
@@ -152,11 +153,17 @@ func TestStatusShape(t *testing.T) {
 	seed(t, st, "alpha", 4*time.Minute, checker.Result{Outcome: checker.OutcomeSkipped, Err: "previous check still in flight"})
 	seed(t, st, "alpha", 5*time.Minute, checker.Result{Duration: 40 * time.Millisecond, Outcome: checker.OutcomeTimeout, Err: "context deadline exceeded"})
 
-	// bravo: 40 rows so the recent strip must be capped at 30.
+	// bravo: 40 rows so the recent strip must be capped at 30. The newest row
+	// carries a certificate so the JSON cert_expires_at field is exercised; the
+	// API renders it with second precision (RFC3339, like "at"), so the seed is
+	// truncated to match.
+	bravoCert := time.Now().Add(48 * time.Hour).UTC().Truncate(time.Second)
 	for i := 1; i <= 40; i++ {
-		seed(t, st, "bravo", time.Duration(i)*time.Minute, checker.Result{
-			Duration: 5 * time.Millisecond, Outcome: checker.OutcomeUp, StatusCode: 200,
-		})
+		res := checker.Result{Duration: 5 * time.Millisecond, Outcome: checker.OutcomeUp, StatusCode: 200}
+		if i == 1 {
+			res.CertExpiresAt = bravoCert
+		}
+		seed(t, st, "bravo", time.Duration(i)*time.Minute, res)
 	}
 
 	// charlie has no rows on purpose.
@@ -216,6 +223,9 @@ func TestStatusShape(t *testing.T) {
 	if at, _ := time.Parse(time.RFC3339, alpha.Last.At); time.Since(at) > 2*time.Minute {
 		t.Errorf("alpha.last.at = %v, want the newest row (~1 minute ago)", at)
 	}
+	if alpha.Last.CertExpiresAt != nil {
+		t.Errorf("alpha.last.cert_expires_at = %q, want null for a result without a certificate", *alpha.Last.CertExpiresAt)
+	}
 
 	// alpha: recent strip, newest first.
 	wantRecent := []string{"up", "down", "up", "skipped", "timeout"}
@@ -266,6 +276,15 @@ func TestStatusShape(t *testing.T) {
 	}
 	if bravo.Last == nil || bravo.Last.Outcome != "up" {
 		t.Errorf("bravo.last = %+v, want the newest up result", bravo.Last)
+	}
+	if bravo.Last != nil {
+		if bravo.Last.CertExpiresAt == nil {
+			t.Error("bravo.last.cert_expires_at = null, want the seeded expiry")
+		} else if got, err := time.Parse(time.RFC3339, *bravo.Last.CertExpiresAt); err != nil {
+			t.Errorf("bravo.last.cert_expires_at = %q, not RFC3339: %v", *bravo.Last.CertExpiresAt, err)
+		} else if !got.Equal(bravoCert) {
+			t.Errorf("bravo.last.cert_expires_at = %v, want %v", got, bravoCert)
+		}
 	}
 	// bravo is 40/40 up -> 100.0% in both windows.
 	if bravo.Uptime24h == nil || *bravo.Uptime24h != 100.0 {
@@ -328,10 +347,16 @@ func TestHistory(t *testing.T) {
 	cfg := config.Config{Targets: []config.Target{target("alpha", "https://alpha.example/health")}}
 
 	const rows = 600
+	// Second precision on purpose: the API formats the expiry as plain RFC3339.
+	cert := time.Now().Add(24 * time.Hour).UTC().Truncate(time.Second)
 	for i := 1; i <= rows; i++ {
-		seed(t, st, "alpha", time.Duration(i)*time.Second, checker.Result{
+		res := checker.Result{
 			Duration: time.Duration(i) * time.Millisecond, Outcome: checker.OutcomeUp, StatusCode: 200,
-		})
+		}
+		if i == 1 {
+			res.CertExpiresAt = cert
+		}
+		seed(t, st, "alpha", time.Duration(i)*time.Second, res)
 	}
 
 	base := newServer(t, cfg, st)
@@ -348,6 +373,14 @@ func TestHistory(t *testing.T) {
 	// i=1 is the newest (age 1s), so duration_ms counts down from 1.
 	if def[0].DurationMs != 1 || def[49].DurationMs != 50 {
 		t.Errorf("default first/last duration = %d/%d, want 1/50 (newest first)", def[0].DurationMs, def[49].DurationMs)
+	}
+	// The newest row's stored certificate rides along in the history element.
+	if def[0].CertExpiresAt == nil {
+		t.Error("history[0].cert_expires_at = null, want the seeded expiry")
+	} else if got, err := time.Parse(time.RFC3339, *def[0].CertExpiresAt); err != nil {
+		t.Errorf("history[0].cert_expires_at = %q, not RFC3339: %v", *def[0].CertExpiresAt, err)
+	} else if !got.Equal(cert) {
+		t.Errorf("history[0].cert_expires_at = %v, want %v", got, cert)
 	}
 
 	// Explicit limit returns that many of the newest rows.

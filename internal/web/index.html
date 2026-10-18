@@ -92,6 +92,7 @@
   .dot.timeout { background: var(--timeout); }
   .dot.skipped { background: var(--skipped); }
   .stats { margin-top: 8px; color: var(--muted); font-size: 13px; }
+  .stats .warn { color: var(--timeout); }
   .empty { color: var(--muted); font-size: 13px; }
 </style>
 </head>
@@ -165,6 +166,38 @@
     return el("div", "stats", parts.length ? "24h: " + parts.join(" · ") : "24h: no data");
   }
 
+  // renderExtra builds the second stats line: the uptime percentages and, when
+  // the newest check saw one, the leaf certificate's remaining days (amber
+  // under 30). Absent values are skipped — the API reports null instead of a
+  // misleading number.
+  function renderExtra(target) {
+    var t = target && typeof target === "object" ? target : {};
+    var line = el("div", "stats");
+    var added = 0;
+
+    function add(text, warn) {
+      if (added > 0) line.appendChild(el("span", null, " · "));
+      line.appendChild(el("span", warn ? "warn" : null, text));
+      added++;
+    }
+
+    if (t.uptime_24h !== null && t.uptime_24h !== undefined) {
+      add("uptime 24h: " + Number(t.uptime_24h).toFixed(1) + "%", false);
+    }
+    if (t.uptime_7d !== null && t.uptime_7d !== undefined) {
+      add("7d: " + Number(t.uptime_7d).toFixed(1) + "%", false);
+    }
+
+    var last = t.last && typeof t.last === "object" ? t.last : null;
+    var certMs = last && last.cert_expires_at ? Date.parse(last.cert_expires_at) : NaN;
+    if (isFinite(certMs)) {
+      var days = Math.floor((certMs - Date.now()) / 86400000);
+      add("cert expires in: " + days + " days", days < 30);
+    }
+
+    return added > 0 ? line : null;
+  }
+
   function renderCard(target) {
     var t = target && typeof target === "object" ? target : {};
     var card = el("section", "card");
@@ -206,6 +239,10 @@
 
     card.appendChild(renderStrip(t.recent));
     card.appendChild(renderStats(t.stats));
+
+    var extra = renderExtra(t);
+    if (extra) card.appendChild(extra);
+
     return card;
   }
 
