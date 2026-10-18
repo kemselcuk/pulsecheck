@@ -259,3 +259,40 @@ All acceptance criteria above checked + the demo video embedded in the README + 
 |---|---|---|
 | **T3.1 Reload plumbing** | `config.Atomic` holder (read per request by api/metrics/web); the SIGHUP loop in the lifecycle select; strict policy — reloadable is the resolved target list, `server`/`storage`/`defaults.workers` and parse failures are rejected with the running configuration intact; the log summarizes added/removed/updated (D41) | Live: same-pid swap `[alpha,beta]` → `[alpha,gamma]` with `uptime_seconds` growing across it, the `config reloaded added=[gamma] removed=[beta] updated=[alpha]` line, and a rejected `workers` change while the service kept serving; `TestReloadConfig`, `TestDiffTargets`, `TestAtomic*` |
 | **T3.2 Scheduler swap** | Name-keyed `targetRunner`s: removed targets' loops stop without interrupting their in-flight check, updated targets carry the in-flight flag onto the replacement loop, unchanged targets keep running, added targets check immediately (D41) | `TestSchedulerReload`: server-side max concurrency stays 1 across an in-flight update; added/removed/unchanged behaviour verified; full `-race` suite green |
+
+---
+
+# v1.2 Phase 4 — TLS options: custom CA and opt-out verification (user-approved 2026-10-19)
+
+> **Status:** ☐ Pending
+
+| Task | Content | Acceptance criteria |
+|---|---|---|
+| **T4.1 Per-target TLS** | `targets[].tls.ca_file` (PEM file, additive to the system roots, read once at load with a 1 MiB cap) and `targets[].tls.insecure_skip_verify` (bool, default false); the derived per-target client carries the TLS settings on both the redirecting and the non-following path | A target whose CA exists only in a local PEM verifies successfully; `insecure_skip_verify` connects to a self-signed host; without either option a self-signed host stays an error; a missing/invalid PEM file is rejected at load with a `config:` error; config PEM cases + scheduler client derivation tested; the existing TLS/certificate tracking is unaffected |
+
+# v1.2 Phase 5 — pprof, opt-in (user-approved 2026-10-19)
+
+> **Status:** ☐ Pending
+
+| Task | Content | Acceptance criteria |
+|---|---|---|
+| **T5.1 pprof server** | A `-pprof <addr>` flag (default off) serving a DEDICATED `/debug/pprof` mux (not the app mux, not `DefaultServeMux`); starts with the process and drains on shutdown; a bind failure is a startup error; the startup log warns that the endpoint is unauthenticated | Disabled by default (no listener); when enabled, `/debug/pprof/` and the profile endpoints respond; the dedicated mux is unit-tested; live curl evidence; README documents the flag and the localhost recommendation (D43) |
+
+# v1.2 Phase 6 — Release hardening: Windows + provenance (user-approved 2026-10-19)
+
+> **Status:** ☐ Pending
+
+| Task | Content | Acceptance criteria |
+|---|---|---|
+| **T6.1 Windows asset** | `windows/amd64` added to the release matrix (a `.exe` inside the archive) | The real release carries four platform archives + checksums |
+| **T6.2 Provenance attestation** | `actions/attest-build-provenance` over the release artifacts, with the required `id-token`/`attestations` permissions | `gh attestation verify` succeeds for a downloaded asset from the real release |
+| **T6.3 Next release (v1.1.0)** | Tag the accumulated feature set (body assertions, duration histogram, batched snapshot, hot reload) to exercise the hardened pipeline end to end | A real release page with four downloadable assets, verified checksums and a verified attestation |
+
+# v1.2 Phase 7 — Nightly soak (user-approved 2026-10-19)
+
+> **Status:** ☐ Pending
+
+| Task | Content | Acceptance criteria |
+|---|---|---|
+| **T7.1 Soak test** | A `SOAK`-gated test (skipped in normal runs) that runs the real stack — scheduler + store + retention — for `SOAK_DURATION` (default 3m) with live reloads, slow targets and pruning, asserting: rows stay bounded by retention, goroutines return to baseline after shutdown, `-race` clean | Locally: a short run green, and the bound assertion demonstrably fails when retention is effectively off (a manual mutation run) |
+| **T7.2 Nightly workflow** | `.github/workflows/soak.yml`: a nightly cron + manual dispatch, `SOAK_DURATION=3m go test -race -timeout 15m` | The workflow file is valid and a dispatch run is green |
