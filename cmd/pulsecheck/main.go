@@ -4,6 +4,8 @@
 // web — together and owns the process lifecycle. A single signal-aware context
 // is the backbone: SIGINT/SIGTERM cancels it, the checker stops because that
 // context IS its context, and the HTTP server drains before the store closes.
+// SIGHUP re-reads the configuration file and swaps the live target list in
+// place, without restarting anything (D41).
 package main
 
 import (
@@ -15,6 +17,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"reflect"
+	"sort"
 	"syscall"
 	"time"
 
@@ -70,15 +74,16 @@ func main() {
 // for the liveness probe, which is a top-level path rather than an /api/ one.
 // Both mounts share one handler, hence one process-start instant for the
 // reported uptime. web.New serves the dashboard at "/" and the target detail
-// pages under "/targets/".
-func newHandler(cfg *config.Config, st *store.Store, version string, logger *slog.Logger) http.Handler {
-	apiHandler := api.New(*cfg, st, version, logger)
+// pages under "/targets/". Every handler reads the target list from the Atomic
+// holder per request, so a SIGHUP reload is visible everywhere at once (D41).
+func newHandler(live *config.Atomic, st *store.Store, version string, logger *slog.Logger) http.Handler {
+	apiHandler := api.New(live, st, version, logger)
 
 	mux := http.NewServeMux()
 	mux.Handle("/api/", apiHandler)
 	mux.Handle("/healthz", apiHandler)
-	mux.Handle("/metrics", metrics.New(*cfg, st, version, logger))
-	mux.Handle("/", web.New(*cfg, st))
+	mux.Handle("/metrics", metrics.New(live, st, version, logger))
+	mux.Handle("/", web.New(live, st))
 	return mux
 }
 
@@ -92,12 +97,13 @@ func newHandler(cfg *config.Config, st *store.Store, version string, logger *slo
 //  1. structured logger to stderr
 //  2. config.Load            — fail fast, exit 1
 //  3. store.Open             — fail fast, exit 1
-//  4. signal context         — SIGINT/SIGTERM
+//  4. signal context         — SIGINT/SIGTERM (+ a SIGHUP reload channel)
 //  5. Store.StartRetention   — background child of that context
 //  6. checker.New + Run      — background child of that context
 //  7. HTTP mux               — "/api/" → api.New, "/" → web.New
 //  8. http.Server + goroutine
-//  9. wait for signal, then drain HTTP, wait for the checker, close the store
+//  9. wait for a signal, reload, or a fatal server error; then drain HTTP,
+//     wait for the checker, close the store
 func run() int {
 	// 1. Structured logger to stderr, so stdout stays free for piping.
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
@@ -105,7 +111,7 @@ func run() int {
 
 	// 2. Configuration. The default points at the bundled demo config, so a
 	// fresh `go run ./cmd/pulsecheck` works with no setup; point -config at a
-	// custom file for real use.
+	// custom file for real use. SIGHUP re-reads this same path.
 	configPath := flag.String("config", "config.demo.json", "path to the JSON configuration file")
 	showVersion := flag.Bool("version", false, "print the build version and exit")
 	flag.Parse()
@@ -140,6 +146,12 @@ func run() int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// SIGHUP asks for a configuration reload. It is deliberately NOT part of
+	// the lifecycle context: a reload must never cancel anything (D41).
+	reloads := make(chan os.Signal, 1)
+	signal.Notify(reloads, syscall.SIGHUP)
+	defer signal.Stop(reloads)
+
 	// 5. Retention runs as a background child of the same context and stops
 	// with it.
 	st.StartRetention(ctx, retentionPeriod, cfg.Storage.Retention, logger)
@@ -151,9 +163,13 @@ func run() int {
 	schedDone := make(chan error, 1)
 	go func() { schedDone <- sched.Run(ctx) }()
 
+	// The live holder is the configuration every request handler reads; a
+	// reload swaps it atomically (D41).
+	live := config.NewAtomic(cfg)
+
 	// 7. HTTP handler, built by newHandler so the route table can be tested
 	// without binding a port.
-	mux := newHandler(cfg, st, version, logger)
+	mux := newHandler(live, st, version, logger)
 
 	// 8. HTTP server. ListenAndServe runs in a goroutine and reports over a
 	// buffered channel, so it can never block — even after this function has
@@ -181,25 +197,33 @@ func run() int {
 		"retention", cfg.Storage.Retention,
 	)
 
-	// 9. Wait for either a fatal server error (e.g. the address is taken) or a
-	// shutdown signal.
-	select {
-	case err := <-srvErr:
-		if err != nil {
-			logger.Error("http server stopped", "err", err)
-			return 1
+	// 9. Serve until a fatal server error or a shutdown signal. SIGHUP reloads
+	// the configuration file in place; a rejection (parse failure or a field
+	// that needs a restart) is logged and the running configuration stays.
+serve:
+	for {
+		select {
+		case err := <-srvErr:
+			if err != nil {
+				logger.Error("http server stopped", "err", err)
+				return 1
+			}
+			return 0
+		case <-ctx.Done():
+			// The first signal cancelled ctx; stop() restores the default
+			// signal disposition so a second SIGINT/SIGTERM during the drain
+			// terminates the process immediately — the classic force-exit
+			// behaviour. Without this, a second signal would be swallowed by
+			// the still-registered handler (D27). This holds where the signal
+			// was not inherited as ignored (a real terminal); POSIX keeps an
+			// inherited SIG_IGN ignored, which is what `cmd &` in a
+			// non-interactive shell produces.
+			stop()
+			logger.Info("shutdown: stopping checks")
+			break serve
+		case <-reloads:
+			reloadConfig(*configPath, live, sched, logger)
 		}
-		return 0
-	case <-ctx.Done():
-		// The first signal cancelled ctx; stop() restores the default signal
-		// disposition so a second SIGINT/SIGTERM during the drain terminates
-		// the process immediately — the classic force-exit behaviour. Without
-		// this, a second signal would be swallowed by the still-registered
-		// handler (D27). This holds where the signal was not inherited as
-		// ignored (a real terminal); POSIX keeps an inherited SIG_IGN ignored,
-		// which is what `cmd &` in a non-interactive shell produces.
-		stop()
-		logger.Info("shutdown: stopping checks")
 	}
 
 	// The signal already cancelled ctx, which IS the checker's context, so the
@@ -233,4 +257,91 @@ func run() int {
 	}
 	logger.Info("shutdown complete")
 	return 0
+}
+
+// reloader is the scheduling layer a reload applies to; *checker.Scheduler
+// implements it, and tests substitute a fake.
+type reloader interface {
+	Reload(config.Config)
+}
+
+// reloadConfig implements SIGHUP: re-read the configuration file and apply it
+// when only reloadable fields changed. Any parse failure, or a change to a
+// field that needs a restart (server.addr, storage, defaults.workers), is
+// rejected with a log line, and the running configuration always stays intact;
+// an unchanged target list is a logged no-op. It reports whether the new
+// configuration was applied.
+func reloadConfig(path string, live *config.Atomic, sched reloader, logger *slog.Logger) bool {
+	next, err := config.Load(path)
+	if err != nil {
+		logger.Error("config reload: rejected, keeping the running configuration", "path", path, "err", err)
+		return false
+	}
+	old := live.Load()
+	if err := runtimeCompatible(old, next); err != nil {
+		logger.Error("config reload: rejected, keeping the running configuration", "err", err)
+		return false
+	}
+	if targetsEqual(old.Targets, next.Targets) {
+		logger.Info("config reload: no target changes")
+		return false
+	}
+
+	added, removed, updated := diffTargets(old.Targets, next.Targets)
+	live.Swap(next)
+	sched.Reload(*next)
+	logger.Info("config reloaded", "added", added, "removed", removed, "updated", updated)
+	return true
+}
+
+// runtimeCompatible rejects changes to configuration fields that cannot be
+// applied to a running process: the listen address, the storage settings, and
+// the worker pool size. Everything that shapes the resolved target list —
+// targets and the interval/timeout defaults — is reloadable (D41).
+func runtimeCompatible(old, next *config.Config) error {
+	switch {
+	case old.Server.Addr != next.Server.Addr:
+		return fmt.Errorf("server.addr changed (%q -> %q): restart required", old.Server.Addr, next.Server.Addr)
+	case old.Storage.DBPath != next.Storage.DBPath:
+		return fmt.Errorf("storage.db_path changed (%q -> %q): restart required", old.Storage.DBPath, next.Storage.DBPath)
+	case old.Storage.Retention != next.Storage.Retention:
+		return fmt.Errorf("storage.retention changed (%v -> %v): restart required", old.Storage.Retention, next.Storage.Retention)
+	case old.Defaults.Workers != next.Defaults.Workers:
+		return fmt.Errorf("defaults.workers changed (%d -> %d): restart required", old.Defaults.Workers, next.Defaults.Workers)
+	}
+	return nil
+}
+
+// targetsEqual reports whether two resolved target lists are identical. Parsed
+// targets are plain data (a regex is compared by value), so DeepEqual is the
+// full comparison.
+func targetsEqual(a, b []config.Target) bool {
+	return reflect.DeepEqual(a, b)
+}
+
+// diffTargets summarizes a reload for the log: which targets were added,
+// removed, or updated, sorted for a deterministic output.
+func diffTargets(old, next []config.Target) (added, removed, updated []string) {
+	oldByName := make(map[string]config.Target, len(old))
+	for _, t := range old {
+		oldByName[t.Name] = t
+	}
+	for _, t := range next {
+		previous, ok := oldByName[t.Name]
+		if !ok {
+			added = append(added, t.Name)
+			continue
+		}
+		if !reflect.DeepEqual(previous, t) {
+			updated = append(updated, t.Name)
+		}
+		delete(oldByName, t.Name)
+	}
+	for name := range oldByName {
+		removed = append(removed, name)
+	}
+	sort.Strings(added)
+	sort.Strings(removed)
+	sort.Strings(updated)
+	return added, removed, updated
 }

@@ -43,7 +43,7 @@ func newStore(t *testing.T) *store.Store {
 func newServer(t *testing.T, cfg config.Config, st *store.Store) string {
 	t.Helper()
 
-	srv := httptest.NewServer(New(cfg, st, testVersion, testLogger()))
+	srv := httptest.NewServer(New(config.NewAtomic(&cfg), st, testVersion, testLogger()))
 	t.Cleanup(srv.Close)
 	return srv.URL
 }
@@ -564,7 +564,7 @@ func TestNilLogger(t *testing.T) {
 	st := newStore(t)
 	cfg := config.Config{Targets: []config.Target{target("alpha", "https://alpha.example/health")}}
 
-	srv := httptest.NewServer(New(cfg, st, testVersion, nil))
+	srv := httptest.NewServer(New(config.NewAtomic(&cfg), st, testVersion, nil))
 	defer srv.Close()
 
 	resp, err := http.Get(srv.URL + "/api/status")

@@ -23,6 +23,7 @@ The project was written to demonstrate **HTTP, concurrency and error handling** 
 - **Liveness endpoint:** `/healthz` reports `ok`, the build version, process uptime, and how fresh the newest stored check is.
 - **Uptime percentages:** 24-hour and 7-day uptime per target; `skipped` rounds are excluded from the denominator (a round where no check ran is not an outage).
 - **TLS certificate tracking:** for `https://` targets the leaf certificate's expiry is read from the response (`resp.TLS`) with no extra dialing and stored with every check.
+- **Zero-downtime config reload:** `SIGHUP` re-reads the configuration file and swaps the target list in place — added, removed and updated targets, in-flight checks never interrupted; `server`, `storage` or `defaults.workers` changes are rejected with a clear log line and need a restart (D41).
 - **Graceful shutdown:** `SIGINT`/`SIGTERM` → the checker stops, HTTP drains, the database closes; the log lines show the ordered steps.
 - **Fuzzing and benchmarks:** the config parser has a native fuzz target; CI runs a 30 s fuzz step and a benchmark evidence step on every push.
 
@@ -142,6 +143,22 @@ time=... level=ERROR msg="failed to load config" path=missing.json err="config: 
 $ echo $?
 1
 ```
+
+### Reloading without a restart
+
+Editing the file has no effect until the process is told to re-read it — send `SIGHUP`:
+
+```console
+$ kill -HUP $(pgrep -f 'pulsecheck$')
+
+# the log reports exactly what changed:
+time=... level=INFO msg="config reloaded" added=[gamma] removed=[beta] updated=[alpha]
+
+# a change that needs a restart is rejected loudly; the running configuration stays:
+time=... level=ERROR msg="config reload: rejected, keeping the running configuration" err="defaults.workers changed (4 -> 8): restart required"
+```
+
+The target list — including per-target intervals, timeouts and check definitions — is swapped in place: the process keeps its pid, in-flight checks are never interrupted, and a removed target's last check still records. `server`, `storage` and `defaults.workers` cannot change at runtime; restart for those (D41).
 
 `config.docker.json` is an exact copy of `config.demo.json` except that the target URLs point at the compose service name (`http://demo-targets:18081/...`).
 
@@ -347,6 +364,7 @@ Which test proves which promise:
 | Body assertions (contains/regex, cap, read errors) | `TestCheckBodyContains`, `TestCheckBodyRegex`, `TestCheckBodyTruncation`, `TestCheckBodyReadError`, `TestCheckBodyReadTimeout` |
 | Duration histogram + percentile estimation | `TestDurationHistogram`, `TestDurationPercentile`, `TestStats` |
 | Batched snapshot equivalence + scale | `TestStatusSnapshotMatchesPerTargetQueries`, `BenchmarkStatusReadPaths` |
+| Zero-downtime reload (swap, in-flight continuity, rejection policy) | `TestSchedulerReload`, `TestReloadConfig`, `TestDiffTargets`, `TestAtomicConcurrentSwapLoad` |
 | Fuzz contract (no panic; config XOR error) | `FuzzParse` (seeds run with every `go test`; CI fuzzes 30 s) |
 
 From a real `go test -race -count=1 -v ./internal/checker/` run (relevant lines only):

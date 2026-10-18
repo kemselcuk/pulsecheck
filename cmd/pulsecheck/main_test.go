@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -41,7 +43,7 @@ func TestNewHandlerMountsEveryRoute(t *testing.T) {
 		t.Fatalf("RecordResult: %v", err)
 	}
 
-	srv := httptest.NewServer(newHandler(cfg, st, "wired-version", slog.New(slog.NewTextHandler(io.Discard, nil))))
+	srv := httptest.NewServer(newHandler(config.NewAtomic(cfg), st, "wired-version", slog.New(slog.NewTextHandler(io.Discard, nil))))
 	t.Cleanup(srv.Close)
 
 	cases := []struct {
@@ -90,7 +92,7 @@ func TestNewHandlerHealthzVersion(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 
-	srv := httptest.NewServer(newHandler(&config.Config{}, st, "1.1.0-test", nil))
+	srv := httptest.NewServer(newHandler(config.NewAtomic(&config.Config{}), st, "1.1.0-test", nil))
 	t.Cleanup(srv.Close)
 
 	resp, err := http.Get(srv.URL + "/healthz")
@@ -121,5 +123,148 @@ func TestVersionOutput(t *testing.T) {
 
 	if got, want := versionOutput(), "pulsecheck v9.9.9-test"; got != want {
 		t.Errorf("versionOutput() = %q, want %q", got, want)
+	}
+}
+
+// fakeReloader records the configurations asked of it.
+type fakeReloader struct {
+	applied []config.Config
+}
+
+// Reload implements the reloader seam for tests.
+func (f *fakeReloader) Reload(cfg config.Config) {
+	f.applied = append(f.applied, cfg)
+}
+
+// TestReloadConfig covers the SIGHUP policy (D41): a changed target list is
+// applied to the holder and the scheduler, a parse failure or a
+// restart-required change is rejected with the holder untouched, and an
+// unchanged target list is a logged no-op.
+func TestReloadConfig(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	base := `{
+		"server":   {"addr": ":8080"},
+		"storage":  {"db_path": "reload.db"},
+		"defaults": {"interval": "30s", "timeout": "5s", "workers": 2},
+		"targets":  [{"name": "a", "url": "https://example.com"}]
+	}`
+	withTargetB := `{
+		"server":   {"addr": ":8080"},
+		"storage":  {"db_path": "reload.db"},
+		"defaults": {"interval": "30s", "timeout": "5s", "workers": 2},
+		"targets":  [
+			{"name": "a", "url": "https://example.com"},
+			{"name": "b", "url": "https://example.org", "interval": "10s"}
+		]
+	}`
+
+	writeConfig := func(t *testing.T, body string) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "config.json")
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+		return path
+	}
+
+	loadBase := func(t *testing.T) (*config.Atomic, *fakeReloader) {
+		t.Helper()
+		cfg, err := config.Load(writeConfig(t, base))
+		if err != nil {
+			t.Fatalf("load base config: %v", err)
+		}
+		return config.NewAtomic(cfg), &fakeReloader{}
+	}
+
+	t.Run("changed target list is applied", func(t *testing.T) {
+		live, fake := loadBase(t)
+		path := writeConfig(t, withTargetB)
+
+		if !reloadConfig(path, live, fake, logger) {
+			t.Fatal("reloadConfig = false, want the change applied")
+		}
+		if got := len(live.Load().Targets); got != 2 {
+			t.Errorf("live targets = %d, want 2", got)
+		}
+		if len(fake.applied) != 1 || len(fake.applied[0].Targets) != 2 {
+			t.Errorf("scheduler got %+v, want one reload with 2 targets", fake.applied)
+		}
+	})
+
+	t.Run("parse failure keeps the running configuration", func(t *testing.T) {
+		live, fake := loadBase(t)
+		path := writeConfig(t, `{"targets": [`)
+
+		if reloadConfig(path, live, fake, logger) {
+			t.Fatal("reloadConfig = true, want the parse failure rejected")
+		}
+		if got := len(live.Load().Targets); got != 1 {
+			t.Errorf("live targets = %d, want the original 1", got)
+		}
+		if len(fake.applied) != 0 {
+			t.Errorf("scheduler got %+v, want nothing", fake.applied)
+		}
+	})
+
+	t.Run("restart-required changes are rejected", func(t *testing.T) {
+		cases := []struct {
+			name string
+			body string
+		}{
+			{"server.addr", strings.Replace(base, `":8080"`, `":9999"`, 1)},
+			{"storage.db_path", strings.Replace(base, `"reload.db"`, `"other.db"`, 1)},
+			{"storage.retention", strings.Replace(base, `{"db_path": "reload.db"}`, `{"db_path": "reload.db", "retention": "6h"}`, 1)},
+			{"defaults.workers", strings.Replace(base, `"workers": 2`, `"workers": 8`, 1)},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				live, fake := loadBase(t)
+				path := writeConfig(t, tc.body)
+
+				if reloadConfig(path, live, fake, logger) {
+					t.Fatalf("reloadConfig = true, want the %s change rejected", tc.name)
+				}
+				cfg := live.Load()
+				if cfg.Server.Addr != ":8080" || cfg.Storage.DBPath != "reload.db" || cfg.Defaults.Workers != 2 {
+					t.Errorf("live config changed after a rejected reload: %+v", cfg)
+				}
+				if len(fake.applied) != 0 {
+					t.Errorf("scheduler got %+v, want nothing", fake.applied)
+				}
+			})
+		}
+	})
+
+	t.Run("unchanged targets are a no-op", func(t *testing.T) {
+		live, fake := loadBase(t)
+		path := writeConfig(t, base)
+
+		if reloadConfig(path, live, fake, logger) {
+			t.Fatal("reloadConfig = true, want an unchanged list to be a no-op")
+		}
+		if len(fake.applied) != 0 {
+			t.Errorf("scheduler got %+v, want nothing", fake.applied)
+		}
+	})
+}
+
+// TestDiffTargets pins the change summary that feeds the reload log.
+func TestDiffTargets(t *testing.T) {
+	tg := func(name, url string) config.Target {
+		return config.Target{Name: name, URL: url, Interval: time.Minute, Timeout: time.Second}
+	}
+	old := []config.Target{tg("a", "https://a.example"), tg("b", "https://b.example"), tg("c", "https://c.example")}
+	next := []config.Target{tg("a", "https://a.example"), tg("b", "https://changed.example"), tg("d", "https://d.example")}
+
+	added, removed, updated := diffTargets(old, next)
+	if len(added) != 1 || added[0] != "d" {
+		t.Errorf("added = %v, want [d]", added)
+	}
+	if len(removed) != 1 || removed[0] != "c" {
+		t.Errorf("removed = %v, want [c]", removed)
+	}
+	if len(updated) != 1 || updated[0] != "b" {
+		t.Errorf("updated = %v, want [b]", updated)
 	}
 }

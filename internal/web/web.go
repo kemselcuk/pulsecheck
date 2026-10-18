@@ -57,9 +57,8 @@ var detailTmpl = template.Must(template.New("detail").Parse(string(detailHTML)))
 
 // server holds the dependencies of the web handlers.
 type server struct {
-	targets []config.Target
-	byName  map[string]config.Target
-	store   *store.Store
+	cfg   *config.Atomic
+	store *store.Store
 }
 
 // New returns the HTTP handler that serves the status screen and the per-target
@@ -67,17 +66,12 @@ type server struct {
 //
 // GET / serves the dashboard; GET /targets/{name} serves the detail page for a
 // configured target. Unknown names are a 404 because configuration, not the
-// store, owns the target list. Every other path keeps the mux default 404. The
-// handler is safe for concurrent use.
-func New(cfg config.Config, st *store.Store) http.Handler {
-	s := &server{
-		targets: cfg.Targets,
-		byName:  make(map[string]config.Target, len(cfg.Targets)),
-		store:   st,
-	}
-	for _, t := range cfg.Targets {
-		s.byName[t.Name] = t
-	}
+// store, owns the target list. The target list is read from the Atomic holder
+// per request (D41), so a SIGHUP reload becomes visible without a restart.
+// Every other path keeps the mux default 404. The handler is safe for
+// concurrent use.
+func New(live *config.Atomic, st *store.Store) http.Handler {
+	s := &server{cfg: live, store: st}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", s.handleIndex)
@@ -94,7 +88,16 @@ func (s *server) handleIndex(w http.ResponseWriter, _ *http.Request) {
 // handleDetail renders the detail page of one configured target.
 func (s *server) handleDetail(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
-	t, ok := s.byName[name]
+	var (
+		t  config.Target
+		ok bool
+	)
+	for _, candidate := range s.cfg.Load().Targets {
+		if candidate.Name == name {
+			t, ok = candidate, true
+			break
+		}
+	}
 	if !ok {
 		http.NotFound(w, r)
 		return

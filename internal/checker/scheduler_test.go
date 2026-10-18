@@ -235,6 +235,187 @@ func TestSlowTargetDoesNotBlockOthers(t *testing.T) {
 
 // TestSchedulerGracefulShutdown checks that Run stops promptly on cancellation,
 // aborts in-flight checks, returns nil, and leaves no goroutines behind.
+// TestSchedulerReload covers the runtime target-set swap (D41): a reload adds
+// targets, retires removed ones, keeps unchanged ones running, and — the core
+// safety property — never lets two checks of the same target run concurrently
+// across an update. The in-flight flag is carried onto the replacement loop, so
+// a blocked check keeps guarding its target (D4/K4 stay true across reloads).
+func TestSchedulerReload(t *testing.T) {
+	release := make(chan struct{})
+	var (
+		mu          sync.Mutex
+		inFlight    int
+		maxInFlight int
+	)
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		inFlight++
+		if inFlight > maxInFlight {
+			maxInFlight = inFlight
+		}
+		mu.Unlock()
+		defer func() {
+			mu.Lock()
+			inFlight--
+			mu.Unlock()
+		}()
+
+		select {
+		case <-release:
+			w.WriteHeader(http.StatusOK)
+		case <-r.Context().Done():
+		}
+	}))
+	t.Cleanup(slow.Close)
+
+	fast := httptest.NewServer(okHandler())
+	t.Cleanup(fast.Close)
+
+	client := fast.Client()
+	t.Cleanup(client.CloseIdleConnections)
+
+	mkTarget := func(name, url string, interval time.Duration) config.Target {
+		return config.Target{Name: name, URL: url, Interval: interval, Timeout: 5 * time.Second}
+	}
+
+	rec := &MemoryRecorder{}
+	sched := New(config.Config{Targets: []config.Target{
+		mkTarget("maintain", slow.URL, 40*time.Millisecond),
+		mkTarget("retire", fast.URL, 40*time.Millisecond),
+		mkTarget("stable", fast.URL, 40*time.Millisecond),
+	}}, client, rec, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	done := make(chan error, 1)
+	go func() { done <- sched.Run(ctx) }()
+
+	waitForTargetResults(t, rec, "retire", 1)
+	waitForTargetResults(t, rec, "stable", 1)
+
+	// Wait until the slow target's check is actually in flight.
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		mu.Lock()
+		held := inFlight >= 1
+		mu.Unlock()
+		if held {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("slow check never became in-flight")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// Reload: maintain is updated (new interval), fresh is added, retire is
+	// removed, stable is untouched.
+	sched.Reload(config.Config{Targets: []config.Target{
+		mkTarget("maintain", slow.URL, 60*time.Millisecond),
+		mkTarget("fresh", fast.URL, 40*time.Millisecond),
+		mkTarget("stable", fast.URL, 40*time.Millisecond),
+	}})
+
+	// The added target starts immediately with its first check.
+	waitForTargetResults(t, rec, "fresh", 1)
+
+	// The unchanged target keeps producing results.
+	stableBefore := countResults(rec, "stable")
+	waitForTargetResults(t, rec, "stable", stableBefore+1)
+
+	// Give the replacement loop of maintain time to tick while the original
+	// check is still blocked: had the in-flight flag not been carried, the
+	// immediate tick would have started a second concurrent check.
+	time.Sleep(250 * time.Millisecond)
+	mu.Lock()
+	maxSeen := maxInFlight
+	mu.Unlock()
+	if maxSeen != 1 {
+		t.Errorf("max concurrent checks on the updated target = %d, want 1 (the in-flight flag must carry across reloads)", maxSeen)
+	}
+
+	// The carry is directly visible in the records too: the replacement loop's
+	// ticks are recorded as in-flight skips while the original check still
+	// runs.
+	inFlightSkips := 0
+	for _, r := range rec.Snapshot() {
+		if r.TargetName == "maintain" && r.Outcome == OutcomeSkipped && r.Err == reasonInFlight {
+			inFlightSkips++
+		}
+	}
+	if inFlightSkips == 0 {
+		t.Error("no in-flight skips recorded for the updated target; the replacement loop's ticks must hit the carried flag")
+	}
+
+	// Release the blocked check: it records its result, and the reloaded loop
+	// keeps its cadence.
+	close(release)
+	waitForOutcome(t, rec, "maintain", OutcomeUp, 1)
+
+	// The removed target goes quiet (after a settle window for any in-flight
+	// check at reload time).
+	time.Sleep(150 * time.Millisecond)
+	settled := countResults(rec, "retire")
+	time.Sleep(200 * time.Millisecond)
+	if grew := countResults(rec, "retire"); grew != settled {
+		t.Errorf("retired target produced %d new result(s) after the reload, want none", grew-settled)
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("scheduler did not stop")
+	}
+}
+
+// countResults counts the recorded results of one target.
+func countResults(rec *MemoryRecorder, name string) int {
+	n := 0
+	for _, r := range rec.Snapshot() {
+		if r.TargetName == name {
+			n++
+		}
+	}
+	return n
+}
+
+// waitForTargetResults polls until the target has at least want recorded
+// results.
+func waitForTargetResults(t *testing.T, rec *MemoryRecorder, name string, want int) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if countResults(rec, name) >= want {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("target %q has fewer than %d results after 3s", name, want)
+}
+
+// waitForOutcome polls until the target has at least want results with outcome.
+func waitForOutcome(t *testing.T, rec *MemoryRecorder, name string, outcome Outcome, want int) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		n := 0
+		for _, r := range rec.Snapshot() {
+			if r.TargetName == name && r.Outcome == outcome {
+				n++
+			}
+		}
+		if n >= want {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("target %q has fewer than %d %q results after 3s", name, want, outcome)
+}
+
 func TestSchedulerGracefulShutdown(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		select {
