@@ -207,23 +207,32 @@ func TestReloadConfig(t *testing.T) {
 		}
 	})
 
-	t.Run("restart-required change is rejected", func(t *testing.T) {
-		live, fake := loadBase(t)
-		path := writeConfig(t, `{
-			"server":   {"addr": ":9999"},
-			"storage":  {"db_path": "reload.db"},
-			"defaults": {"interval": "30s", "timeout": "5s", "workers": 2},
-			"targets":  [{"name": "a", "url": "https://example.com"}]
-		}`)
+	t.Run("restart-required changes are rejected", func(t *testing.T) {
+		cases := []struct {
+			name string
+			body string
+		}{
+			{"server.addr", strings.Replace(base, `":8080"`, `":9999"`, 1)},
+			{"storage.db_path", strings.Replace(base, `"reload.db"`, `"other.db"`, 1)},
+			{"storage.retention", strings.Replace(base, `{"db_path": "reload.db"}`, `{"db_path": "reload.db", "retention": "6h"}`, 1)},
+			{"defaults.workers", strings.Replace(base, `"workers": 2`, `"workers": 8`, 1)},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				live, fake := loadBase(t)
+				path := writeConfig(t, tc.body)
 
-		if reloadConfig(path, live, fake, logger) {
-			t.Fatal("reloadConfig = true, want the addr change rejected")
-		}
-		if got := live.Load().Server.Addr; got != ":8080" {
-			t.Errorf("live addr = %q, want the original :8080", got)
-		}
-		if len(fake.applied) != 0 {
-			t.Errorf("scheduler got %+v, want nothing", fake.applied)
+				if reloadConfig(path, live, fake, logger) {
+					t.Fatalf("reloadConfig = true, want the %s change rejected", tc.name)
+				}
+				cfg := live.Load()
+				if cfg.Server.Addr != ":8080" || cfg.Storage.DBPath != "reload.db" || cfg.Defaults.Workers != 2 {
+					t.Errorf("live config changed after a rejected reload: %+v", cfg)
+				}
+				if len(fake.applied) != 0 {
+					t.Errorf("scheduler got %+v, want nothing", fake.applied)
+				}
+			})
 		}
 	})
 

@@ -334,6 +334,19 @@ func TestSchedulerReload(t *testing.T) {
 		t.Errorf("max concurrent checks on the updated target = %d, want 1 (the in-flight flag must carry across reloads)", maxSeen)
 	}
 
+	// The carry is directly visible in the records too: the replacement loop's
+	// ticks are recorded as in-flight skips while the original check still
+	// runs.
+	inFlightSkips := 0
+	for _, r := range rec.Snapshot() {
+		if r.TargetName == "maintain" && r.Outcome == OutcomeSkipped && r.Err == reasonInFlight {
+			inFlightSkips++
+		}
+	}
+	if inFlightSkips == 0 {
+		t.Error("no in-flight skips recorded for the updated target; the replacement loop's ticks must hit the carried flag")
+	}
+
 	// Release the blocked check: it records its result, and the reloaded loop
 	// keeps its cadence.
 	close(release)
