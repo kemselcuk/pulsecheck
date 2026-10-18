@@ -4,6 +4,8 @@
     { "name": "wikipedia", "url": "https://www.wikipedia.org", "interval": "15s" },
     { "name": "golang", "url": "https://go.dev/", "timeout": "3s",
       "headers": { "Accept": "text/html", "User-Agent": "pulsecheck-example/1.0" } },
+    { "name": "httpbin-robots", "url": "https://httpbin.org/robots.txt",
+      "expect_body_contains": "Disallow: /deny", "interval": "120s" },
     { "name": "httpbin-204", "url": "https://httpbin.org/status/204",
       "expected_status": 204, "interval": "60s" },
     { "name": "httpbin-post", "url": "https://httpbin.org/post",

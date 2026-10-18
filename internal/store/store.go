@@ -52,6 +52,11 @@ var schemaStatements = []string{
 }
 
 // Stats aggregates the results of one target over a time window.
+//
+// The duration fields describe only the COMPLETED checks (up + down + timeout +
+// error); skipped rows are excluded everywhere, consistent with uptime (D30d):
+// a skipped row means no check ran, so it carries no duration and no outcome
+// signal for the latency figures.
 type Stats struct {
 	Up            int
 	Down          int
@@ -59,6 +64,33 @@ type Stats struct {
 	Error         int
 	Skipped       int
 	AvgDurationMs int64
+	// P50DurationMs and P95DurationMs estimate the completed-check duration
+	// percentiles from DurationBuckets: the value is the upper bound of the
+	// bucket containing the rank, so it is a CEILING, not an interpolated
+	// percentile. nil when the window holds no completed checks, or when the
+	// percentile falls in the open-ended bucket (above the last finite bound) —
+	// a bucket ceiling cannot express that case.
+	P50DurationMs *int64
+	P95DurationMs *int64
+	// DurationBuckets is the CUMULATIVE duration histogram of the completed
+	// checks over the window: each Count is the number of completed checks with
+	// duration less than or equal to UpperBoundMs. The list ends with the
+	// open-ended bucket (UpperBoundMs == math.MaxInt64), whose Count equals the
+	// total number of completed checks. Empty only when the window is not
+	// positive.
+	DurationBuckets []DurationBucket
+	// DurationSumMs is the summed duration of the completed checks, the
+	// histogram's _sum analogue.
+	DurationSumMs int64
+}
+
+// DurationBucket is one bucket of the windowed duration histogram: UpperBoundMs
+// is the inclusive upper bound in milliseconds (math.MaxInt64 marks the
+// open-ended trailing bucket) and Count is the cumulative number of completed
+// checks at or below that bound.
+type DurationBucket struct {
+	UpperBoundMs int64
+	Count        int
 }
 
 // Store persists check results in a local SQLite database.
@@ -283,7 +315,8 @@ func (s *Store) History(target string, limit int) ([]checker.Result, error) {
 	return results, nil
 }
 
-// Stats counts outcomes and averages the duration of target over the window
+// Stats aggregates the counts, the average duration, the windowed duration
+// histogram, and the duration percentile estimates of target over the window
 // ending now. Durations are stored and averaged in whole milliseconds, and the
 // average is rounded to the nearest millisecond.
 //
@@ -319,7 +352,61 @@ func (s *Store) Stats(target string, window time.Duration) (Stats, error) {
 	if avgMs.Valid {
 		stats.AvgDurationMs = int64(math.Round(avgMs.Float64))
 	}
+
+	if err := s.durationHistogram(target, cutoff, &stats); err != nil {
+		return Stats{}, err
+	}
 	return stats, nil
+}
+
+// durationHistogram fills the duration fields of stats from the grouped bucket
+// query: per-bucket counts and sums are folded into cumulative buckets and the
+// p50/p95 estimates are derived from them. The open-ended bucket is always
+// appended, so the final cumulative count equals the number of completed checks
+// even when no bucket row was returned.
+func (s *Store) durationHistogram(target string, cutoff int64, stats *Stats) error {
+	rows, err := s.db.Query(durationBucketsQuery, target, cutoff)
+	if err != nil {
+		return fmt.Errorf("store: duration histogram for %q: %w", target, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	counts := make(map[int64]int, len(durationBucketBoundsMs)+1)
+	sums := make(map[int64]int64, len(durationBucketBoundsMs)+1)
+	for rows.Next() {
+		var (
+			upper int64
+			count int
+			sum   int64
+		)
+		if err := rows.Scan(&upper, &count, &sum); err != nil {
+			return fmt.Errorf("store: scan duration histogram for %q: %w", target, err)
+		}
+		counts[upper] = count
+		sums[upper] = sum
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("store: duration histogram for %q: %w", target, err)
+	}
+
+	stats.DurationBuckets = make([]DurationBucket, 0, len(durationBucketBoundsMs)+1)
+	cumulative := 0
+	for _, ub := range durationBucketBoundsMs {
+		cumulative += counts[ub]
+		stats.DurationSumMs += sums[ub]
+		stats.DurationBuckets = append(stats.DurationBuckets, DurationBucket{UpperBoundMs: ub, Count: cumulative})
+	}
+	cumulative += counts[openBucketMs]
+	stats.DurationSumMs += sums[openBucketMs]
+	stats.DurationBuckets = append(stats.DurationBuckets, DurationBucket{UpperBoundMs: openBucketMs, Count: cumulative})
+
+	if p50, ok := durationPercentile(stats.DurationBuckets, 0.50); ok {
+		stats.P50DurationMs = &p50
+	}
+	if p95, ok := durationPercentile(stats.DurationBuckets, 0.95); ok {
+		stats.P95DurationMs = &p95
+	}
+	return nil
 }
 
 // Close releases the underlying database handle.

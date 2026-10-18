@@ -78,14 +78,18 @@ type resultView struct {
 	CertExpiresAt *string `json:"cert_expires_at"`
 }
 
-// statsView mirrors store.Stats in snake_case JSON.
+// statsView mirrors store.Stats in snake_case JSON. The duration percentiles
+// are estimates derived from the histogram buckets (store.DurationBuckets), not
+// interpolated values; see the store package for the exact semantics.
 type statsView struct {
-	Up            int   `json:"up"`
-	Down          int   `json:"down"`
-	Timeout       int   `json:"timeout"`
-	Error         int   `json:"error"`
-	Skipped       int   `json:"skipped"`
-	AvgDurationMs int64 `json:"avg_duration_ms"`
+	Up            int    `json:"up"`
+	Down          int    `json:"down"`
+	Timeout       int    `json:"timeout"`
+	Error         int    `json:"error"`
+	Skipped       int    `json:"skipped"`
+	AvgDurationMs int64  `json:"avg_duration_ms"`
+	P50DurationMs *int64 `json:"p50_duration_ms"`
+	P95DurationMs *int64 `json:"p95_duration_ms"`
 }
 
 // healthResponse is the body of GET /healthz.
@@ -215,6 +219,8 @@ func (s *apiServer) targetStatus(t config.Target) (targetStatus, error) {
 		Error:         stats.Error,
 		Skipped:       stats.Skipped,
 		AvgDurationMs: stats.AvgDurationMs,
+		P50DurationMs: stats.P50DurationMs,
+		P95DurationMs: stats.P95DurationMs,
 	}
 
 	// Uptime is reported for two windows. hasData is false for an empty window

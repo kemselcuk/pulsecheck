@@ -195,25 +195,143 @@ func TestStats(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Stats: %v", err)
 	}
-	want := Stats{Up: 2, Down: 1, Skipped: 1, AvgDurationMs: 150}
-	if got != want {
-		t.Errorf("Stats = %+v, want %+v", got, want)
+	// Counts and the average first; the histogram and percentile fields are
+	// asserted separately below because Stats now carries a slice and pointers,
+	// so it is no longer comparable with ==.
+	if got.Up != 2 || got.Down != 1 || got.Timeout != 0 || got.Error != 0 ||
+		got.Skipped != 1 || got.AvgDurationMs != 150 {
+		t.Errorf("Stats counts/avg = %+v, want 2 up/1 down/1 skipped, avg 150ms", got)
 	}
 
+	// The completed durations are 100, 200, and 300 ms (the skipped row is
+	// excluded). Cumulative buckets: <=100:1, <=250:2, <=500:3. p50 rank
+	// ceil(0.5*3)=2 -> the 250ms ceiling; p95 rank ceil(0.95*3)=3 -> the 500ms
+	// ceiling.
+	wantBuckets := []DurationBucket{
+		{5, 0}, {10, 0}, {25, 0}, {50, 0}, {100, 1}, {250, 2},
+		{500, 3}, {1000, 3}, {2500, 3}, {5000, 3}, {10000, 3}, {openBucketMs, 3},
+	}
+	if len(got.DurationBuckets) != len(wantBuckets) {
+		t.Fatalf("len(DurationBuckets) = %d, want %d", len(got.DurationBuckets), len(wantBuckets))
+	}
+	for i, want := range wantBuckets {
+		if got.DurationBuckets[i] != want {
+			t.Errorf("DurationBuckets[%d] = %+v, want %+v", i, got.DurationBuckets[i], want)
+		}
+	}
+	if got.DurationSumMs != 600 {
+		t.Errorf("DurationSumMs = %d, want 600", got.DurationSumMs)
+	}
+	if got.P50DurationMs == nil || *got.P50DurationMs != 250 {
+		t.Errorf("P50DurationMs = %v, want 250", got.P50DurationMs)
+	}
+	if got.P95DurationMs == nil || *got.P95DurationMs != 500 {
+		t.Errorf("P95DurationMs = %v, want 500", got.P95DurationMs)
+	}
+
+	// An empty target still gets the full zero histogram (a count of 0 is a
+	// real measurement), but no percentile estimates.
 	empty, err := s.Stats("missing", 24*time.Hour)
 	if err != nil {
 		t.Fatalf("Stats(missing): %v", err)
 	}
-	if empty != (Stats{}) {
-		t.Errorf("Stats(missing) = %+v, want zero Stats", empty)
+	if empty.Up != 0 || empty.AvgDurationMs != 0 || empty.DurationSumMs != 0 {
+		t.Errorf("Stats(missing) = %+v, want zero counts and sum", empty)
+	}
+	if len(empty.DurationBuckets) != len(wantBuckets) ||
+		empty.DurationBuckets[len(empty.DurationBuckets)-1].Count != 0 {
+		t.Errorf("Stats(missing) buckets = %+v, want the full zero histogram", empty.DurationBuckets)
+	}
+	if empty.P50DurationMs != nil || empty.P95DurationMs != nil {
+		t.Errorf("Stats(missing) percentiles = (%v, %v), want (nil, nil)", empty.P50DurationMs, empty.P95DurationMs)
 	}
 
+	// A non-positive window describes an empty interval: zero Stats, no buckets.
 	nonPositive, err := s.Stats("svc", 0)
 	if err != nil {
 		t.Fatalf("Stats(0): %v", err)
 	}
-	if nonPositive != (Stats{}) {
+	if nonPositive.DurationBuckets != nil || nonPositive.Up != 0 || nonPositive.P50DurationMs != nil {
 		t.Errorf("Stats(0) = %+v, want zero Stats", nonPositive)
+	}
+}
+
+// TestDurationHistogram covers the windowed duration histogram: inclusive
+// millisecond boundaries, skipped-row exclusion, cumulative counts, the sum,
+// and the percentile estimates — including the open-bucket null case.
+func TestDurationHistogram(t *testing.T) {
+	s, _ := openStore(t, "histogram.db")
+	now := time.Now()
+
+	seed := []checker.Result{
+		// Exactly on the first bound -> the <=5 bucket.
+		{TargetName: "svc", StartedAt: now.Add(-1 * time.Minute), Duration: 5 * time.Millisecond, Outcome: checker.OutcomeUp, StatusCode: 200},
+		// One millisecond over -> the <=10 bucket.
+		{TargetName: "svc", StartedAt: now.Add(-2 * time.Minute), Duration: 6 * time.Millisecond, Outcome: checker.OutcomeUp, StatusCode: 200},
+		// Above the last finite bound -> the open-ended bucket.
+		{TargetName: "svc", StartedAt: now.Add(-3 * time.Minute), Duration: 12500 * time.Millisecond, Outcome: checker.OutcomeTimeout, Err: "context deadline exceeded"},
+		// Skipped rows never count: no check ran for them.
+		{TargetName: "svc", StartedAt: now.Add(-4 * time.Minute), Outcome: checker.OutcomeSkipped, Err: "previous check still in flight"},
+	}
+	for _, r := range seed {
+		if err := s.RecordResult(r); err != nil {
+			t.Fatalf("RecordResult: %v", err)
+		}
+	}
+
+	got, err := s.Stats("svc", 24*time.Hour)
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+
+	wantCounts := map[int64]int{
+		5: 1, 10: 2, 25: 2, 50: 2, 100: 2, 250: 2,
+		500: 2, 1000: 2, 2500: 2, 5000: 2, 10000: 2, openBucketMs: 3,
+	}
+	if len(got.DurationBuckets) != len(wantCounts) {
+		t.Fatalf("len(DurationBuckets) = %d, want %d", len(got.DurationBuckets), len(wantCounts))
+	}
+	for _, bucket := range got.DurationBuckets {
+		want, ok := wantCounts[bucket.UpperBoundMs]
+		if !ok {
+			t.Errorf("unexpected bucket bound %d", bucket.UpperBoundMs)
+			continue
+		}
+		if bucket.Count != want {
+			t.Errorf("bucket <=%d = %d, want %d", bucket.UpperBoundMs, bucket.Count, want)
+		}
+	}
+	if got.DurationSumMs != 12511 { // 5 + 6 + 12500
+		t.Errorf("DurationSumMs = %d, want 12511", got.DurationSumMs)
+	}
+	// p50 rank ceil(0.5*3)=2 -> the 10ms ceiling. p95 rank ceil(0.95*3)=3 lands
+	// in the open-ended bucket, whose ceiling cannot be expressed -> null.
+	if got.P50DurationMs == nil || *got.P50DurationMs != 10 {
+		t.Errorf("P50DurationMs = %v, want 10", got.P50DurationMs)
+	}
+	if got.P95DurationMs != nil {
+		t.Errorf("P95DurationMs = %v, want null (rank in the open-ended bucket)", *got.P95DurationMs)
+	}
+}
+
+// TestDurationPercentile is the unit-level pin for the estimation rule.
+func TestDurationPercentile(t *testing.T) {
+	buckets := []DurationBucket{{UpperBoundMs: 5, Count: 2}, {UpperBoundMs: 10, Count: 4}, {UpperBoundMs: openBucketMs, Count: 5}}
+
+	if got, ok := durationPercentile(buckets, 0.1); !ok || got != 5 { // rank 1
+		t.Errorf("q=0.1 -> (%d, %v), want (5, true)", got, ok)
+	}
+	if got, ok := durationPercentile(buckets, 0.5); !ok || got != 10 { // rank 3
+		t.Errorf("q=0.5 -> (%d, %v), want (10, true)", got, ok)
+	}
+	if _, ok := durationPercentile(buckets, 0.9); ok { // rank 5 -> open bucket
+		t.Error("q=0.9 -> ok, want false (the rank lands in the open-ended bucket)")
+	}
+	if _, ok := durationPercentile([]DurationBucket{{UpperBoundMs: openBucketMs, Count: 0}}, 0.5); ok {
+		t.Error("no completed checks -> ok, want false")
+	}
+	if _, ok := durationPercentile(nil, 0.5); ok {
+		t.Error("no buckets -> ok, want false")
 	}
 }
 

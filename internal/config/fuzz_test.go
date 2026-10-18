@@ -26,7 +26,8 @@ import (
 //  3. On success the resolved config satisfies every promise the rest of the
 //     program makes about it: positive durations, uniquely-named targets,
 //     absolute http(s) URLs, method tokens that match ^[A-Z]+$, expected_status
-//     inside 100..599 (when set), and positive workers and retention.
+//     inside 100..599 (when set), at most one body assertion and never one
+//     combined with HEAD, and positive workers and retention.
 //  4. On failure the error is non-empty and names the "config" subsystem, so an
 //     operator can tell a configuration problem apart from an I/O one.
 func FuzzParse(f *testing.F) {
@@ -70,6 +71,14 @@ func FuzzParse(f *testing.F) {
 	// a lowercase method that must normalize rather than error.
 	f.Add(`{"targets":[{"name":"a","url":"https://example.com","headers":{"X-Trace":"1"," X-Trace":"2"}}]}`)
 	f.Add(`{"targets":[{"name":"a","url":"https://example.com","method":"post"}]}`)
+	// Body assertions (D38): one seed per accepted form and one per rejection
+	// class (both together, HEAD, an invalid pattern, and an empty value).
+	f.Add(`{"targets":[{"name":"a","url":"https://example.com","expect_body_contains":"operational"}]}`)
+	f.Add(`{"targets":[{"name":"a","url":"https://example.com","expect_body_regex":"^ok\\s*$"}]}`)
+	f.Add(`{"targets":[{"name":"a","url":"https://example.com","expect_body_contains":"a","expect_body_regex":"b"}]}`)
+	f.Add(`{"targets":[{"name":"a","url":"https://example.com","method":"HEAD","expect_body_contains":"a"}]}`)
+	f.Add(`{"targets":[{"name":"a","url":"https://example.com","expect_body_regex":"["}]}`)
+	f.Add(`{"targets":[{"name":"a","url":"https://example.com","expect_body_contains":""}]}`)
 
 	f.Fuzz(func(t *testing.T, data string) {
 		cfg, err := Parse(strings.NewReader(data))
@@ -141,6 +150,14 @@ func FuzzParse(f *testing.F) {
 			}
 			if !isUpperAlphaToken(tg.Method) {
 				t.Fatalf("Parse(%q) targets[%d].method = %q, want a token matching ^[A-Z]+$", data, i, tg.Method)
+			}
+			// Body assertions: at most one form, and never paired with HEAD
+			// (whose responses have no body to match).
+			if tg.ExpectBodyContains != "" && tg.ExpectBodyRegex != nil {
+				t.Fatalf("Parse(%q) targets[%d] carries both body assertions", data, i)
+			}
+			if tg.Method == "HEAD" && (tg.ExpectBodyContains != "" || tg.ExpectBodyRegex != nil) {
+				t.Fatalf("Parse(%q) targets[%d] pairs HEAD with a body assertion", data, i)
 			}
 		}
 	})

@@ -2,8 +2,10 @@ package checker
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -335,6 +337,141 @@ func TestCheckExpectedStatusWithRedirects(t *testing.T) {
 	}
 	if res := Check(context.Background(), noFollow, noRedirect); res.Outcome != OutcomeUp || res.StatusCode != http.StatusMovedPermanently {
 		t.Errorf("raw 301 expecting 301: Outcome = %q (status %d), want up/301", res.Outcome, res.StatusCode)
+	}
+}
+
+// TestCheckBodyContains covers the substring assertion: a matching body stays
+// up, while a missing needle turns an accepted status into down with a
+// describing error, keeping the status code visible.
+func TestCheckBodyContains(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "all systems operational")
+	}))
+	t.Cleanup(srv.Close)
+
+	client := srv.Client()
+	t.Cleanup(client.CloseIdleConnections)
+
+	up := Check(context.Background(), config.Target{
+		Name: "match", URL: srv.URL, ExpectBodyContains: "operational",
+	}, client)
+	if up.Outcome != OutcomeUp {
+		t.Errorf("matching body: Outcome = %q (err=%q), want %q", up.Outcome, up.Err, OutcomeUp)
+	}
+
+	down := Check(context.Background(), config.Target{
+		Name: "mismatch", URL: srv.URL, ExpectBodyContains: "welcome",
+	}, client)
+	if down.Outcome != OutcomeDown {
+		t.Errorf("missing needle: Outcome = %q (err=%q), want %q", down.Outcome, down.Err, OutcomeDown)
+	}
+	if down.StatusCode != http.StatusOK {
+		t.Errorf("missing needle: StatusCode = %d, want %d", down.StatusCode, http.StatusOK)
+	}
+	if !strings.Contains(down.Err, `body does not contain "welcome"`) {
+		t.Errorf("missing needle: Err = %q, want the describing message", down.Err)
+	}
+}
+
+// TestCheckBodyRegex covers the regexp form and its error wording.
+func TestCheckBodyRegex(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "build 2026.10.19 ready")
+	}))
+	t.Cleanup(srv.Close)
+
+	client := srv.Client()
+	t.Cleanup(client.CloseIdleConnections)
+
+	up := Check(context.Background(), config.Target{
+		Name: "match", URL: srv.URL, ExpectBodyRegex: regexp.MustCompile(`build \d{4}\.\d{2}\.\d{2}`),
+	}, client)
+	if up.Outcome != OutcomeUp {
+		t.Errorf("matching regexp: Outcome = %q (err=%q), want %q", up.Outcome, up.Err, OutcomeUp)
+	}
+
+	down := Check(context.Background(), config.Target{
+		Name: "mismatch", URL: srv.URL, ExpectBodyRegex: regexp.MustCompile(`^ready`),
+	}, client)
+	if down.Outcome != OutcomeDown {
+		t.Errorf("non-matching regexp: Outcome = %q (err=%q), want %q", down.Outcome, down.Err, OutcomeDown)
+	}
+	if !strings.Contains(down.Err, `body does not match regexp "^ready"`) {
+		t.Errorf("non-matching regexp: Err = %q, want the describing message", down.Err)
+	}
+}
+
+// TestCheckBodyTruncation pins the 64 KiB read cap: a needle inside the cap is
+// found, the same needle beyond it is invisible and counts as a mismatch — the
+// cap is part of the documented contract (D38).
+func TestCheckBodyTruncation(t *testing.T) {
+	prefix := strings.Repeat("a", maxBodyRead)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, prefix+"NEEDLE")
+	}))
+	t.Cleanup(srv.Close)
+
+	client := srv.Client()
+	t.Cleanup(client.CloseIdleConnections)
+
+	inside := Check(context.Background(), config.Target{
+		Name: "inside", URL: srv.URL, ExpectBodyContains: strings.Repeat("a", 10),
+	}, client)
+	if inside.Outcome != OutcomeUp {
+		t.Errorf("needle inside the cap: Outcome = %q (err=%q), want %q", inside.Outcome, inside.Err, OutcomeUp)
+	}
+
+	beyond := Check(context.Background(), config.Target{
+		Name: "beyond", URL: srv.URL, ExpectBodyContains: "NEEDLE",
+	}, client)
+	if beyond.Outcome != OutcomeDown {
+		t.Errorf("needle beyond the cap: Outcome = %q, want %q", beyond.Outcome, OutcomeDown)
+	}
+}
+
+// TestCheckBodyReadError pins mid-body failures: a response whose body ends
+// before its declared Content-Length is an error, not a silent pass.
+func TestCheckBodyReadError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Length", "100")
+		_, _ = io.WriteString(w, "short")
+	}))
+	t.Cleanup(srv.Close)
+
+	client := srv.Client()
+	t.Cleanup(client.CloseIdleConnections)
+
+	res := Check(context.Background(), config.Target{
+		Name: "truncated", URL: srv.URL, ExpectBodyContains: "short",
+	}, client)
+	if res.Outcome != OutcomeError {
+		t.Errorf("truncated body: Outcome = %q (err=%q), want %q", res.Outcome, res.Err, OutcomeError)
+	}
+	if res.Err == "" {
+		t.Error("truncated body: Err is empty, want the read error")
+	}
+}
+
+// TestCheckBodyReadTimeout pins the interaction with the request deadline: a
+// server that stalls after the headers turns the body read past the deadline
+// into a timeout, not a generic error.
+func TestCheckBodyReadTimeout(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush() // headers out; the body is withheld
+		<-r.Context().Done()     // block until the client gives up
+	}))
+	t.Cleanup(srv.Close)
+
+	client := srv.Client()
+	t.Cleanup(client.CloseIdleConnections)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+
+	res := Check(ctx, config.Target{Name: "stall", URL: srv.URL, ExpectBodyContains: "x"}, client)
+	if res.Outcome != OutcomeTimeout {
+		t.Errorf("stalled body: Outcome = %q (err=%q), want %q", res.Outcome, res.Err, OutcomeTimeout)
 	}
 }
 
