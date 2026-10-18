@@ -114,6 +114,18 @@ func TestMetricsBody(t *testing.T) {
 
 		"pulsecheck_target_cert_expiry_days{target=\"alpha\"} 2", // 72h floored to 2 days
 
+		// The duration histogram: the completed checks are 12ms (up) and 30ms
+		// (down); the skipped row is excluded. The cumulative counts cross at
+		// 0.025 (12ms) and 0.05 (30ms); the sum is 0.042 s.
+		"pulsecheck_check_duration_seconds_24h_bucket{target=\"alpha\",le=\"0.005\"} 0",
+		"pulsecheck_check_duration_seconds_24h_bucket{target=\"alpha\",le=\"0.01\"} 0",
+		"pulsecheck_check_duration_seconds_24h_bucket{target=\"alpha\",le=\"0.025\"} 1",
+		"pulsecheck_check_duration_seconds_24h_bucket{target=\"alpha\",le=\"0.05\"} 2",
+		"pulsecheck_check_duration_seconds_24h_bucket{target=\"alpha\",le=\"0.1\"} 2",
+		"pulsecheck_check_duration_seconds_24h_bucket{target=\"alpha\",le=\"+Inf\"} 2",
+		"pulsecheck_check_duration_seconds_24h_sum{target=\"alpha\"} 0.042",
+		"pulsecheck_check_duration_seconds_24h_count{target=\"alpha\"} 2",
+
 		fmt.Sprintf("pulsecheck_last_check_timestamp_seconds{target=\"alpha\"} %d", newest.Unix()),
 	}
 	for _, want := range wantLines {
@@ -165,6 +177,18 @@ func TestMetricsEmptyStore(t *testing.T) {
 	if strings.Contains(body, "pulsecheck_target_cert_expiry_days{") {
 		t.Error("empty store must not expose a certificate expiry series")
 	}
+	// The duration histogram is the exception to the absent-series rule: a
+	// bucket count of 0 is a real measurement, so the full zero histogram is
+	// emitted even for a never-checked target.
+	if !strings.Contains(body, "pulsecheck_check_duration_seconds_24h_bucket{target=\"idle\",le=\"+Inf\"} 0\n") {
+		t.Errorf("empty store must expose the zero histogram's +Inf bucket\n---\n%s", body)
+	}
+	if !strings.Contains(body, "pulsecheck_check_duration_seconds_24h_count{target=\"idle\"} 0\n") {
+		t.Errorf("empty store must expose a zero histogram count\n---\n%s", body)
+	}
+	if !strings.Contains(body, "pulsecheck_check_duration_seconds_24h_sum{target=\"idle\"} 0.000\n") {
+		t.Errorf("empty store must expose a zero histogram sum\n---\n%s", body)
+	}
 }
 
 // TestMetricsEscaping pins the label escaping with a target name containing a
@@ -214,7 +238,7 @@ func TestMetricsFormatIsStable(t *testing.T) {
 
 	body := scrape(t, cfg, st)
 
-	declared := map[string]bool{}
+	declared := map[string]string{} // family -> declared TYPE
 	lines := strings.Split(strings.TrimSuffix(body, "\n"), "\n")
 	for i, line := range lines {
 		switch {
@@ -232,11 +256,12 @@ func TestMetricsFormatIsStable(t *testing.T) {
 			}
 		case strings.HasPrefix(line, "# TYPE "):
 			rest := strings.TrimPrefix(line, "# TYPE ")
-			fam := strings.Fields(rest)[0]
-			if len(strings.Fields(rest)) != 2 {
+			fields := strings.Fields(rest)
+			if len(fields) != 2 {
 				t.Errorf("TYPE line %q must be \"# TYPE <name> <type>\"", line)
+				continue
 			}
-			declared[fam] = true
+			declared[fields[0]] = fields[1]
 		case line == "":
 			t.Errorf("unexpected blank line at %d", i+1)
 		default:
@@ -246,7 +271,19 @@ func TestMetricsFormatIsStable(t *testing.T) {
 			} else if idx := strings.IndexByte(fam, ' '); idx >= 0 {
 				fam = fam[:idx]
 			}
-			if !declared[fam] {
+			// Histogram series belong to their base family: the TYPE line
+			// declares the base name as a histogram and the _bucket/_sum/_count
+			// series follow it, so resolve them to that declared base — a
+			// suffix on a non-histogram family is a mistake, not a match.
+			if _, ok := declared[fam]; !ok {
+				for _, suffix := range []string{"_bucket", "_sum", "_count"} {
+					if base := strings.TrimSuffix(fam, suffix); base != fam && declared[base] == "histogram" {
+						fam = base
+						break
+					}
+				}
+			}
+			if _, ok := declared[fam]; !ok {
 				t.Errorf("series %q at line %d appears before its TYPE", line, i+1)
 			}
 			if len(strings.Fields(line)) != 2 {

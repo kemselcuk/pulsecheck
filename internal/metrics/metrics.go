@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -123,11 +124,14 @@ func (t targetSample) count(o checker.Outcome) int {
 // render builds the exposition body.
 //
 // Each metric family emits its HELP and TYPE lines before every series of that
-// family, and all six families are always emitted even when they carry no
+// family, and all seven families are always emitted even when they carry no
 // series, so the output shape does not change as data appears or ages out.
 // Families whose value is genuinely unknown for a target (duration, certificate
 // expiry, last-check timestamp) simply omit that target's series rather than
-// inventing a 0, which a scraper could not tell from a real measurement.
+// inventing a 0, which a scraper could not tell from a real measurement. The
+// duration histogram is the exception that proves the rule: a bucket count of 0
+// is a real measurement (no completed check fell in the bucket), so the
+// histogram is emitted with zeros instead of being omitted.
 //
 // The store is queried live per scrape: at this scale that is simpler and always
 // consistent with the database, while an in-process registry is the documented
@@ -204,6 +208,31 @@ func (s *server) render() (string, error) {
 		}
 		fmt.Fprintf(&b, "pulsecheck_last_check_timestamp_seconds{target=\"%s\"} %d\n",
 			escapeLabelValue(sm.name), sm.last.StartedAt.Unix())
+	}
+
+	// The windowed duration histogram. Like the results family above it is a
+	// window aggregate, not a lifetime histogram: retention deletes rows, so
+	// bucket counts can decrease between scrapes. Completed checks only — a
+	// skipped round never measured a duration (D30d/D39).
+	b.WriteString("# HELP pulsecheck_check_duration_seconds_24h Duration histogram of completed checks over the last 24 hours, in seconds (cumulative classic buckets); skipped rounds are excluded. Windowed: retention shrinks the counts.\n")
+	b.WriteString("# TYPE pulsecheck_check_duration_seconds_24h histogram\n")
+	for _, sm := range samples {
+		for _, bucket := range sm.stats.DurationBuckets {
+			le := "+Inf"
+			if bucket.UpperBoundMs != math.MaxInt64 {
+				le = strconv.FormatFloat(float64(bucket.UpperBoundMs)/1000, 'g', -1, 64)
+			}
+			fmt.Fprintf(&b, "pulsecheck_check_duration_seconds_24h_bucket{target=\"%s\",le=\"%s\"} %d\n",
+				escapeLabelValue(sm.name), le, bucket.Count)
+		}
+		total := 0
+		if n := len(sm.stats.DurationBuckets); n > 0 {
+			total = sm.stats.DurationBuckets[n-1].Count
+		}
+		fmt.Fprintf(&b, "pulsecheck_check_duration_seconds_24h_sum{target=\"%s\"} %.3f\n",
+			escapeLabelValue(sm.name), float64(sm.stats.DurationSumMs)/1000)
+		fmt.Fprintf(&b, "pulsecheck_check_duration_seconds_24h_count{target=\"%s\"} %d\n",
+			escapeLabelValue(sm.name), total)
 	}
 
 	return b.String(), nil

@@ -462,6 +462,58 @@ func TestParse(t *testing.T) {
 	}
 }
 
+// TestParseBodyAssertions covers the two optional body assertions: resolution
+// into the resolved target, the regex pre-compilation (D38), and every
+// rejection class (both forms together, empty values, an invalid pattern, and
+// the HEAD combination).
+func TestParseBodyAssertions(t *testing.T) {
+	tests := []struct {
+		name         string
+		extra        string // merged into the single target object
+		wantContains string
+		wantRegex    string // ExpectBodyRegex.String() when set
+		wantErr      string // substring that must appear in the error
+	}{
+		{name: "contains resolves", extra: `,"expect_body_contains":"welcome"`, wantContains: "welcome"},
+		{name: "regex compiles", extra: `,"expect_body_regex":"^ok\\s*$"`, wantRegex: `^ok\s*$`},
+		{name: "both rejected", extra: `,"expect_body_contains":"a","expect_body_regex":"b"`, wantErr: "mutually exclusive"},
+		{name: "empty contains rejected", extra: `,"expect_body_contains":""`, wantErr: "expect_body_contains must not be empty"},
+		{name: "empty regex rejected", extra: `,"expect_body_regex":""`, wantErr: "expect_body_regex must not be empty"},
+		{name: "invalid regex rejected", extra: `,"expect_body_regex":"["`, wantErr: "invalid"},
+		{name: "HEAD with contains rejected", extra: `,"method":"HEAD","expect_body_contains":"x"`, wantErr: "cannot be combined with method HEAD"},
+		{name: "lowercase head with regex rejected", extra: `,"method":"head","expect_body_regex":"x"`, wantErr: "cannot be combined with method HEAD"},
+		{name: "HEAD alone is fine", extra: `,"method":"HEAD"`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := Parse(strings.NewReader(`{"targets":[{"name":"a","url":"https://example.com"` + tc.extra + `}]}`))
+			if tc.wantErr != "" {
+				if err == nil {
+					t.Fatalf("Parse() error = nil, want %q", tc.wantErr)
+				}
+				if !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("Parse() error = %q, want it to contain %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Parse() error = %v", err)
+			}
+			target := cfg.Targets[0]
+			if target.ExpectBodyContains != tc.wantContains {
+				t.Errorf("ExpectBodyContains = %q, want %q", target.ExpectBodyContains, tc.wantContains)
+			}
+			gotRegex := ""
+			if target.ExpectBodyRegex != nil {
+				gotRegex = target.ExpectBodyRegex.String()
+			}
+			if gotRegex != tc.wantRegex {
+				t.Errorf("ExpectBodyRegex = %q, want %q", gotRegex, tc.wantRegex)
+			}
+		})
+	}
+}
+
 func TestLoad(t *testing.T) {
 	path := t.TempDir() + "/pulsecheck.json"
 	if err := os.WriteFile(path, []byte(`{"targets": [{"name": "a", "url": "https://example.com"}]}`), 0o600); err != nil {

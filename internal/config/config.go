@@ -74,15 +74,23 @@ type DefaultsConfig struct {
 //   - Headers are sent with every request; a nil map means no extra headers.
 //   - FollowRedirects controls whether the HTTP redirect chain is followed
 //     (default true).
+//   - ExpectBodyContains, when non-empty, additionally requires the response
+//     body to contain this substring for the target to be up.
+//   - ExpectBodyRegex, when non-nil (compiled once at Parse time), requires the
+//     response body to match it. At most one of the two body assertions can be
+//     configured; both are rejected together with Method "HEAD" (a HEAD
+//     response has no body).
 type Target struct {
-	Name            string
-	URL             string
-	Method          string
-	ExpectedStatus  int
-	Headers         map[string]string
-	FollowRedirects bool
-	Interval        time.Duration
-	Timeout         time.Duration
+	Name               string
+	URL                string
+	Method             string
+	ExpectedStatus     int
+	Headers            map[string]string
+	FollowRedirects    bool
+	ExpectBodyContains string
+	ExpectBodyRegex    *regexp.Regexp
+	Interval           time.Duration
+	Timeout            time.Duration
 }
 
 // rawConfig mirrors the on-disk JSON shape before defaults are applied.
@@ -109,14 +117,16 @@ type rawDefaults struct {
 }
 
 type rawTarget struct {
-	Name            string            `json:"name"`
-	URL             string            `json:"url"`
-	Method          string            `json:"method"`
-	ExpectedStatus  *int              `json:"expected_status"`
-	Headers         map[string]string `json:"headers"`
-	FollowRedirects *bool             `json:"follow_redirects"`
-	Interval        string            `json:"interval"`
-	Timeout         string            `json:"timeout"`
+	Name               string            `json:"name"`
+	URL                string            `json:"url"`
+	Method             string            `json:"method"`
+	ExpectedStatus     *int              `json:"expected_status"`
+	Headers            map[string]string `json:"headers"`
+	FollowRedirects    *bool             `json:"follow_redirects"`
+	ExpectBodyContains *string           `json:"expect_body_contains"`
+	ExpectBodyRegex    *string           `json:"expect_body_regex"`
+	Interval           string            `json:"interval"`
+	Timeout            string            `json:"timeout"`
 }
 
 // Parse decodes, defaults, and validates a configuration from r.
@@ -206,6 +216,10 @@ func Parse(r io.Reader) (*Config, error) {
 		if err != nil {
 			return nil, err
 		}
+		bodyContains, bodyRegex, err := parseBodyAssertions(fmt.Sprintf("targets[%d]", i), method, rt.ExpectBodyContains, rt.ExpectBodyRegex)
+		if err != nil {
+			return nil, err
+		}
 
 		targetInterval, err := parseDuration(fmt.Sprintf("targets[%d].interval", i), rt.Interval, interval)
 		if err != nil {
@@ -217,14 +231,16 @@ func Parse(r io.Reader) (*Config, error) {
 		}
 
 		cfg.Targets = append(cfg.Targets, Target{
-			Name:            name,
-			URL:             targetURL,
-			Method:          method,
-			ExpectedStatus:  expectedStatus,
-			Headers:         headers,
-			FollowRedirects: parseFollowRedirects(rt.FollowRedirects),
-			Interval:        targetInterval,
-			Timeout:         targetTimeout,
+			Name:               name,
+			URL:                targetURL,
+			Method:             method,
+			ExpectedStatus:     expectedStatus,
+			Headers:            headers,
+			FollowRedirects:    parseFollowRedirects(rt.FollowRedirects),
+			ExpectBodyContains: bodyContains,
+			ExpectBodyRegex:    bodyRegex,
+			Interval:           targetInterval,
+			Timeout:            targetTimeout,
 		})
 	}
 
@@ -318,6 +334,39 @@ func parseHeaders(field string, raw map[string]string) (map[string]string, error
 		headers[trimmed] = value
 	}
 	return headers, nil
+}
+
+// parseBodyAssertions resolves the optional body assertions. At most one of
+// expect_body_contains / expect_body_regex may be configured; both use pointer
+// fields so an explicitly empty value is rejected instead of silently
+// disabling the rule, and the regex is compiled here so every later stage can
+// rely on a valid pattern (the trust-boundary discipline of D32). A body
+// assertion combined with method HEAD is rejected too: a HEAD response has no
+// body, so such a target could never be up.
+func parseBodyAssertions(field, method string, rawContains, rawRegex *string) (string, *regexp.Regexp, error) {
+	if rawContains != nil && rawRegex != nil {
+		return "", nil, fmt.Errorf("config: %s: expect_body_contains and expect_body_regex are mutually exclusive, set only one", field)
+	}
+	if method == "HEAD" && (rawContains != nil || rawRegex != nil) {
+		return "", nil, fmt.Errorf("config: %s: body assertions cannot be combined with method HEAD, whose responses have no body", field)
+	}
+	if rawContains != nil {
+		if *rawContains == "" {
+			return "", nil, fmt.Errorf("config: %s.expect_body_contains must not be empty", field)
+		}
+		return *rawContains, nil, nil
+	}
+	if rawRegex != nil {
+		if *rawRegex == "" {
+			return "", nil, fmt.Errorf("config: %s.expect_body_regex must not be empty", field)
+		}
+		re, err := regexp.Compile(*rawRegex)
+		if err != nil {
+			return "", nil, fmt.Errorf("config: %s.expect_body_regex %q is invalid: %w", field, *rawRegex, err)
+		}
+		return "", re, nil
+	}
+	return "", nil, nil
 }
 
 // parseFollowRedirects resolves the optional follow_redirects flag, defaulting

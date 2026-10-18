@@ -1,8 +1,10 @@
 package checker
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"time"
@@ -16,11 +18,14 @@ type Outcome string
 const (
 	// OutcomeUp means the final HTTP status (after redirects) was accepted: it
 	// equalled the target's expected_status when one was configured, or fell in
-	// the 2xx range otherwise.
+	// the 2xx range otherwise. When the target also configures a body assertion,
+	// the body must satisfy it as well.
 	OutcomeUp Outcome = "up"
-	// OutcomeDown means a response was received with a non-2xx status.
+	// OutcomeDown means a response was received but failed the acceptance rules:
+	// a status mismatch, or a configured body assertion that did not hold.
 	OutcomeDown Outcome = "down"
-	// OutcomeTimeout means the request did not finish before its deadline.
+	// OutcomeTimeout means the request (or the body read of a configured body
+	// assertion) did not finish before its deadline.
 	OutcomeTimeout Outcome = "timeout"
 	// OutcomeError means any other failure (connection error, bad URL, ...).
 	OutcomeError Outcome = "error"
@@ -28,10 +33,18 @@ const (
 	OutcomeSkipped Outcome = "skipped"
 )
 
+// maxBodyRead bounds how much of a response body is read when the target
+// configures a body assertion: only the first 64 KiB are searched, so a
+// pathological or endless body can neither grow the checker's memory nor hold
+// the request open. A match that exists only beyond the cap cannot be seen and
+// counts as a mismatch; the cap is part of the documented contract (D38).
+const maxBodyRead = 64 << 10
+
 // Result describes what happened during one check of a target.
 //
-// Err carries the reason only for the error, timeout, and skipped outcomes;
-// the down outcome is described by StatusCode instead.
+// Err carries the reason for the error, timeout, and skipped outcomes, and for
+// a down outcome that failed a body assertion; a plain status mismatch is
+// described by StatusCode instead.
 type Result struct {
 	TargetName string
 	URL        string
@@ -56,6 +69,11 @@ type Result struct {
 // equals it, otherwise the up status is down; when t.ExpectedStatus is zero the
 // 2xx rule applies (any 2xx is up, anything else is down). Both rules judge the
 // FINAL response after any redirects the client followed.
+//
+// When t.ExpectBodyContains or t.ExpectBodyRegex is configured, an accepted
+// status must additionally satisfy the body rule — an endpoint answering "200
+// OK" with an error page is then classified down with a describing Err. Only
+// the first maxBodyRead bytes of the body are searched (decision D38).
 //
 // The caller owns the deadline: ctx is passed to the request unchanged, so the
 // scheduler can wrap it in a per-request context.WithTimeout while tests can
@@ -100,27 +118,14 @@ func Check(ctx context.Context, t config.Target, client *http.Client) (res Resul
 
 	resp, err := client.Do(req)
 	if err != nil {
-		res.Err = err.Error()
-		switch {
-		case errors.Is(err, context.DeadlineExceeded):
-			res.Outcome = OutcomeTimeout
-		case errors.Is(err, context.Canceled):
-			// A cancelled check is normally caused by shutdown (or an explicit
-			// caller cancel); it is reported as an error and the scheduler
-			// decides whether to persist it.
-			res.Outcome = OutcomeError
-			res.Err = "context canceled"
-		default:
-			res.Outcome = OutcomeError
-		}
+		res.Outcome, res.Err = classifyTransportError(err)
 		return res
 	}
 
-	// Always close the body, and drain a little first so the transport can
-	// reuse the keep-alive connection instead of tearing it down. On a
-	// read-only body neither error is actionable, so both are explicit drops.
+	// Always close the body; how much of it is read depends on whether a body
+	// assertion is configured (see below). On a read-only body the close error
+	// is not actionable, so it is an explicit drop.
 	defer func() { _ = resp.Body.Close() }()
-	_, _ = io.CopyN(io.Discard, resp.Body, 512)
 
 	res.StatusCode = resp.StatusCode
 	switch {
@@ -136,12 +141,53 @@ func Check(ctx context.Context, t config.Target, client *http.Client) (res Resul
 		res.Outcome = OutcomeDown
 	}
 
-	// resp.TLS belongs to the FINAL response, i.e. the connection that produced
-	// StatusCode after any redirects were followed; PeerCertificates[0] is that
-	// connection's leaf certificate. A plain HTTP response has resp.TLS == nil,
-	// leaving CertExpiresAt at its zero value.
+	// The certificate is captured for every response — including one that fails
+	// a body assertion: the TLS handshake completed either way. resp.TLS belongs
+	// to the FINAL response, i.e. the connection that produced StatusCode after
+	// any redirects were followed; PeerCertificates[0] is that connection's leaf
+	// certificate. A plain HTTP response has resp.TLS == nil, leaving
+	// CertExpiresAt at its zero value.
 	if resp.TLS != nil && len(resp.TLS.PeerCertificates) > 0 {
 		res.CertExpiresAt = resp.TLS.PeerCertificates[0].NotAfter
 	}
+
+	// Body handling. With a configured assertion the first maxBodyRead bytes of
+	// the body become part of the acceptance rules; reading them also serves
+	// keep-alive reuse for bodies within the cap (a longer body is closed with
+	// the remainder unread, so that connection is not reused). Without an
+	// assertion the body is not needed, so only a small drain happens so the
+	// transport can reuse the connection instead of tearing it down.
+	if res.Outcome == OutcomeUp && (t.ExpectBodyContains != "" || t.ExpectBodyRegex != nil) {
+		body, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyRead))
+		if err != nil {
+			res.Outcome, res.Err = classifyTransportError(err)
+			return res
+		}
+		switch {
+		case t.ExpectBodyContains != "" && !bytes.Contains(body, []byte(t.ExpectBodyContains)):
+			res.Outcome = OutcomeDown
+			res.Err = fmt.Sprintf("body does not contain %q", t.ExpectBodyContains)
+		case t.ExpectBodyRegex != nil && !t.ExpectBodyRegex.Match(body):
+			res.Outcome = OutcomeDown
+			res.Err = fmt.Sprintf("body does not match regexp %q", t.ExpectBodyRegex.String())
+		}
+		return res
+	}
+	_, _ = io.CopyN(io.Discard, resp.Body, 512)
 	return res
+}
+
+// classifyTransportError maps a transport-level error — from sending the
+// request or from reading the response body — to its outcome and message: a
+// deadline overflow is a timeout, an explicit cancel is reported as a
+// shutdown-side error, and anything else keeps the raw message.
+func classifyTransportError(err error) (Outcome, string) {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return OutcomeTimeout, err.Error()
+	case errors.Is(err, context.Canceled):
+		return OutcomeError, "context canceled"
+	default:
+		return OutcomeError, err.Error()
+	}
 }

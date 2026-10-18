@@ -113,12 +113,14 @@ type jsonResult struct {
 }
 
 type jsonStats struct {
-	Up            int   `json:"up"`
-	Down          int   `json:"down"`
-	Timeout       int   `json:"timeout"`
-	Error         int   `json:"error"`
-	Skipped       int   `json:"skipped"`
-	AvgDurationMs int64 `json:"avg_duration_ms"`
+	Up            int    `json:"up"`
+	Down          int    `json:"down"`
+	Timeout       int    `json:"timeout"`
+	Error         int    `json:"error"`
+	Skipped       int    `json:"skipped"`
+	AvgDurationMs int64  `json:"avg_duration_ms"`
+	P50DurationMs *int64 `json:"p50_duration_ms"`
+	P95DurationMs *int64 `json:"p95_duration_ms"`
 }
 
 type errorPayload struct {
@@ -238,10 +240,19 @@ func TestStatusShape(t *testing.T) {
 		}
 	}
 
-	// alpha: 24h stats. avg = (10+20+30+0+40)/5 = 20.
-	wantStats := jsonStats{Up: 2, Down: 1, Timeout: 1, Skipped: 1, AvgDurationMs: 20}
-	if alpha.Stats != wantStats {
-		t.Errorf("alpha.stats = %+v, want %+v", alpha.Stats, wantStats)
+	// alpha: 24h stats. avg = (10+20+30+0+40)/5 = 20. The percentile estimates
+	// come from the histogram buckets over completed checks (skipped excluded):
+	// durations 10, 20, 30, 40 ms, so p50 rank 2 -> the 25ms ceiling and p95
+	// rank 4 -> the 50ms ceiling.
+	if alpha.Stats.Up != 2 || alpha.Stats.Down != 1 || alpha.Stats.Timeout != 1 ||
+		alpha.Stats.Error != 0 || alpha.Stats.Skipped != 1 || alpha.Stats.AvgDurationMs != 20 {
+		t.Errorf("alpha.stats = %+v, want 2 up/1 down/1 timeout/1 skipped, avg 20ms", alpha.Stats)
+	}
+	if alpha.Stats.P50DurationMs == nil || *alpha.Stats.P50DurationMs != 25 {
+		t.Errorf("alpha.stats.p50_duration_ms = %v, want 25", alpha.Stats.P50DurationMs)
+	}
+	if alpha.Stats.P95DurationMs == nil || *alpha.Stats.P95DurationMs != 50 {
+		t.Errorf("alpha.stats.p95_duration_ms = %v, want 50", alpha.Stats.P95DurationMs)
 	}
 
 	// alpha: uptime. Completed checks are 2 up + 1 down + 1 timeout = 4, and the
@@ -286,17 +297,28 @@ func TestStatusShape(t *testing.T) {
 			t.Errorf("bravo.last.cert_expires_at = %v, want %v", got, bravoCert)
 		}
 	}
-	// bravo is 40/40 up -> 100.0% in both windows.
+	// bravo is 40/40 up -> 100.0% in both windows, and 40 checks at exactly 5ms
+	// put both percentile estimates on the first bucket's 5ms ceiling.
 	if bravo.Uptime24h == nil || *bravo.Uptime24h != 100.0 {
 		t.Errorf("bravo.uptime_24h = %v, want 100", bravo.Uptime24h)
 	}
 	if bravo.Uptime7d == nil || *bravo.Uptime7d != 100.0 {
 		t.Errorf("bravo.uptime_7d = %v, want 100", bravo.Uptime7d)
 	}
+	if bravo.Stats.P50DurationMs == nil || *bravo.Stats.P50DurationMs != 5 {
+		t.Errorf("bravo.stats.p50_duration_ms = %v, want 5", bravo.Stats.P50DurationMs)
+	}
+	if bravo.Stats.P95DurationMs == nil || *bravo.Stats.P95DurationMs != 5 {
+		t.Errorf("bravo.stats.p95_duration_ms = %v, want 5", bravo.Stats.P95DurationMs)
+	}
 
-	// charlie has no rows, so both uptime figures are null.
+	// charlie has no rows, so both uptime figures and both percentile estimates
+	// are null.
 	if got.Targets[2].Uptime24h != nil || got.Targets[2].Uptime7d != nil {
 		t.Errorf("charlie uptime = (%v, %v), want (null, null)", got.Targets[2].Uptime24h, got.Targets[2].Uptime7d)
+	}
+	if got.Targets[2].Stats.P50DurationMs != nil || got.Targets[2].Stats.P95DurationMs != nil {
+		t.Errorf("charlie percentiles = (%v, %v), want (null, null)", got.Targets[2].Stats.P50DurationMs, got.Targets[2].Stats.P95DurationMs)
 	}
 }
 
