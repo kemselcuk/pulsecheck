@@ -190,7 +190,7 @@ All acceptance criteria above checked + the demo video embedded in the README + 
 
 ## v1.1 Phase 4 — Shipping
 
-> **Status:** ☐ Pending
+> **Status:** ✅ Complete (2026-10-18) — version injection (`make build VERSION=...`, `dev` default; startup log + `/healthz` + `/metrics` all report it, injected value verified live); golangci-lint v2.15.0 pinned with a curated, uncapped `.golangci.yml` as a separate CI job (all 30 errcheck findings fixed in code — explicit `_ =` drops of unactionable errors, each audited); tag-triggered release workflow (static linux/amd64+arm64 and darwin/arm64 tarballs, sha256 checksums, `-race` pre-publish guard, `gh release create`). Independent review: APPROVE (2 nits fixed — checksum `./` prefix, lint comment accuracy; 4 observations, none actionable). T4.4-R (`v1.0.0`): tag pushed right after the merge + green CI; the release evidence is recorded in a follow-up commit.
 
 | Task | Content | Acceptance criteria |
 |---|---|---|
