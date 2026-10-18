@@ -1,6 +1,6 @@
 # PulseCheck — Implementation Plan
 
-**Status:** ✅ Approved and implemented (2026-10-18) · Phases 0–6 complete; the single open item was CI activation, now resolved (see D29).
+**Status:** ✅ Approved and implemented (2026-10-18) · Phases 0–6 complete; the single open item was CI activation, now resolved (see D29). v1.1 (rich checks, observability, robustness, shipping, docs) is complete; the first release `v1.0.0` is live.
 **Accountability:** User = final scope and implementation approval. Orchestrator (me) = project lead and technical acceptance. Code = `opencode-go/deepseek-v4.1-flash`, independent review = `opencode-go/glm-5.3-flash`.
 
 ---
@@ -169,7 +169,7 @@ All acceptance criteria above checked + the demo video embedded in the README + 
 
 ## v1.1 Phase 2 — Observability
 
-> **Status:** ✅ Complete (2026-10-18) — implementer: `deepseek-v4.1-flash` (their own live smoke caught + fixed a /healthz mount bug, pinned by main_test.go); reviewer: `glm-5.3-flash` (APPROVE; EXPLAIN QUERY PLAN index proof, empirical escaping/XSS probes, byte-stability; findings minor/nit only — no code change requested). Orchestrator: live smoke reproduced; D31 recorded.
+> **Status:** ✅ Complete (2026-10-18) — implementer: `deepseek-v4.1-flash` (their own live smoke caught + fixed a /healthz mount bug, pinned by main_test.go); reviewer: `glm-5.3-flash` (APPROVE; EXPLAIN QUERY PLAN index proof, empirical escaping/XSS probes, byte-stability; findings minor/nit only — no code change requested). Orchestrator: live smoke reproduced; D31 recorded. (T2.1-R's task row names `pulsecheck_check_results_total`; the shipped family is `pulsecheck_check_results_24h` — see D31 for why a lifetime counter was rejected.)
 
 | Task | Content | Acceptance criteria |
 |---|---|---|
@@ -201,7 +201,7 @@ All acceptance criteria above checked + the demo video embedded in the README + 
 
 ## v1.1 Phase 5 — Docs + final review
 
-> **Status:** ☐ Pending
+> **Status:** ✅ Complete (2026-10-18) — README rewritten for the full v1.1 surface (rich config fields, `/metrics`, `/healthz`, uptime, certificate tracking, detail pages, fuzzing/benchmarks, the `v1.0.0` release flow, local version injection); every console block verified verbatim against real runs. D36 records the acceptance reconciliation (cert_expires_at in the JSON API, uptime + certificate lines on the dashboard, amber below 30 days on both pages) — independently verified by the reviewer in a rendered DOM via headless Chrome, including all three threshold states. Final review: APPROVE (1 minor + 1 nit fixed: `method` added to the example config, sample-run note added; 2 observations closed: the T2.1-R naming footnote above and the exact CI trigger wording). The user's final approval is the last step.
 
 | Task | Content | Acceptance criteria |
 |---|---|---|

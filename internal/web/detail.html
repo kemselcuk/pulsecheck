@@ -84,6 +84,7 @@
     font-variant-numeric: tabular-nums;
   }
   .stats b { color: var(--text); font-weight: 600; }
+  .stats .warn, .stats .warn b { color: var(--timeout); }
   .chart { margin-top: 14px; }
   .chart svg { display: block; width: 100%; height: auto; }
   .chart .line { fill: none; stroke: var(--up); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
@@ -113,7 +114,7 @@
   <div class="stats">
     <span>24h uptime: <b>{{.Uptime24h}}</b></span>
     <span>7d uptime: <b>{{.Uptime7d}}</b></span>
-    {{if .HasCert}}<span>cert expires in: <b>{{.CertDays}} days</b></span>{{end}}
+    {{if .HasCert}}<span{{if .CertWarn}} class="warn"{{end}}>cert expires in: <b>{{.CertDays}} days</b></span>{{end}}
   </div>
   {{if .HasChart}}
   <div class="chart">

@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/kemselcuk/pulsecheck/actions/workflows/ci.yml/badge.svg)](https://github.com/kemselcuk/pulsecheck/actions/workflows/ci.yml)
 
-PulseCheck is a single Go application that checks HTTP targets from a JSON configuration at configurable intervals, stores the results in a local SQLite file, and serves a small JSON API plus a single-page status dashboard. Checks run concurrently through a bounded worker pool; a delayed target never blocks the others, an overlapping round on the same target is recorded as `skipped`, and the process exits cleanly on `SIGINT`/`SIGTERM`.
+PulseCheck is a single Go application that checks HTTP targets from a JSON configuration at configurable intervals, stores the results in a local SQLite file, and serves a small JSON API plus a single-page status dashboard. Checks run concurrently through a bounded worker pool; a delayed target never blocks the others, an overlapping round on the same target is recorded as `skipped`, and the process exits cleanly on `SIGINT`/`SIGTERM`. A Prometheus text endpoint (`/metrics`), a liveness probe (`/healthz`) with build metadata, and per-target detail pages (uptime, TLS certificate expiry, duration sparkline) round out the observability story.
 
 The project was written to demonstrate **HTTP, concurrency and error handling** in Go through a real, small service: standard library only, plus a single pure-Go SQLite driver. Every meaningful decision is recorded with its rationale in `docs/decisions.md`.
 
@@ -13,9 +13,16 @@ The project was written to demonstrate **HTTP, concurrency and error handling** 
 - **Bounded worker pool:** the number of concurrent checks is structurally limited by `defaults.workers`.
 - **Per-request context timeout:** every check is bounded by `context.WithTimeout`; there is exactly one timeout mechanism.
 - **Overlapping rounds are `skipped`:** while the previous check of a target is still running, the new round is skipped and recorded together with its reason.
+- **Rich check definitions:** per target — `method`, `expected_status` (only that code counts as `up`), request `headers`, and a `follow_redirects` switch.
 - **24-hour retention:** old results are pruned periodically in the background (configurable).
-- **Single-page dashboard:** embedded HTML/CSS/JS; no external resources, works offline, polls `/api/status` every 5 seconds.
+- **Single-page dashboard:** embedded HTML/CSS/JS; no external resources, works offline, polls `/api/status` every 5 seconds; each card links to its target's detail page.
+- **Per-target detail pages:** `/targets/{name}` — server-rendered, no JavaScript: latest outcome, 24 h/7 d uptime figures, TLS certificate expiry (amber below 30 days) and an inline SVG sparkline of the most recent durations.
+- **Prometheus metrics:** `/metrics` in the classic text exposition format, answered from live store queries; windowed gauges, absent series for unknown values (decision D31).
+- **Liveness endpoint:** `/healthz` reports `ok`, the build version, process uptime, and how fresh the newest stored check is.
+- **Uptime percentages:** 24-hour and 7-day uptime per target; `skipped` rounds are excluded from the denominator (a round where no check ran is not an outage).
+- **TLS certificate tracking:** for `https://` targets the leaf certificate's expiry is read from the response (`resp.TLS`) with no extra dialing and stored with every check.
 - **Graceful shutdown:** `SIGINT`/`SIGTERM` → the checker stops, HTTP drains, the database closes; the log lines show the ordered steps.
+- **Fuzzing and benchmarks:** the config parser has a native fuzz target; CI runs a 30 s fuzz step and a benchmark evidence step on every push.
 
 ## Quick start
 
@@ -51,6 +58,36 @@ $ docker compose up --build
 
 The same demo comes up in two containers: `demo-targets` (reachable only inside the compose network, `:18081`) and `pulsecheck` (`0.0.0.0:8080`). The dashboard is again at **http://localhost:8080**; the targets point at `http://demo-targets:18081/...`.
 
+## Releases
+
+Prebuilt binaries are published from git tags by [`release.yml`](.github/workflows/release.yml): static builds (`CGO_ENABLED=0`), `-trimpath`, the version injected from the tag name, with a sha256 `checksums.txt` alongside. The first release is **v1.0.0**:
+
+| Asset | Platform |
+|---|---|
+| `pulsecheck_v1.0.0_linux_amd64.tar.gz` | Linux, x86-64 (static) |
+| `pulsecheck_v1.0.0_linux_arm64.tar.gz` | Linux, arm64 (static) |
+| `pulsecheck_v1.0.0_darwin_arm64.tar.gz` | macOS, Apple silicon |
+
+```console
+$ gh release download v1.0.0 --repo kemselcuk/pulsecheck --dir pulsecheck-v1.0.0
+$ cd pulsecheck-v1.0.0
+$ shasum -a 256 -c checksums.txt        # sha256sum on Linux
+pulsecheck_v1.0.0_darwin_arm64.tar.gz: OK
+pulsecheck_v1.0.0_linux_amd64.tar.gz: OK
+pulsecheck_v1.0.0_linux_arm64.tar.gz: OK
+$ tar -xzf pulsecheck_v1.0.0_darwin_arm64.tar.gz
+$ ./pulsecheck -config path/to/config.json        # any PulseCheck config file
+```
+
+Local builds inject the version explicitly — `make build` defaults to `dev`, and the value flows into the startup log, `/healthz` and `/metrics`:
+
+```console
+$ make build VERSION=v1.0.0
+$ ./bin/pulsecheck -config config.example.json &
+$ curl -s localhost:8080/healthz
+{"ok":true,"version":"v1.0.0","uptime_seconds":25.032,"last_write_age_seconds":0.031}
+```
+
 ## Configuration
 
 Configuration is JSON, passed via the `-config` flag (default `config.demo.json`). Every field is optional; any omitted field falls back to its default, and every target carries concrete `interval`/`timeout` values after `Load`. Durations are Go duration strings (`"10s"`, `"500ms"`, `"24h"`). For a realistic example see [`config.example.json`](config.example.json).
@@ -67,8 +104,29 @@ Configuration is JSON, passed via the `-config` flag (default `config.demo.json`
 | `targets[].url` | — (**required**) | Absolute `http`/`https` URL |
 | `targets[].interval` | `defaults.interval` | Per-target interval |
 | `targets[].timeout` | `defaults.timeout` | Per-target timeout |
+| `targets[].method` | `GET` | HTTP method (a valid method token) |
+| `targets[].expected_status` | unset | When set, the target is `up` iff the *final* response has this code; unset → any 2xx is `up` |
+| `targets[].headers` | `{}` | Extra request headers; names that collide after trimming are rejected (decision D32b) |
+| `targets[].follow_redirects` | `true` | Follow the redirect chain before judging the final status |
 
-Validation is strict: unknown fields, empty or duplicate target names, non-absolute URLs, and non-positive durations/worker counts are rejected. Try it:
+A richer definition (all four fields are demonstrated in `config.example.json`):
+
+```json
+{
+  "targets": [
+    { "name": "httpbin-204", "url": "https://httpbin.org/status/204",
+      "expected_status": 204, "interval": "60s" },
+    { "name": "httpbin-post", "url": "https://httpbin.org/post",
+      "method": "POST", "expected_status": 200, "interval": "120s" },
+    { "name": "httpbin-legacy-redirect", "url": "https://httpbin.org/redirect-to?url=/status/200&status_code=301",
+      "follow_redirects": false, "expected_status": 301 }
+  ]
+}
+```
+
+With `expected_status: 500` a maintenance endpoint that answers 500 counts as `up`; with `follow_redirects: false` the 301 itself is the final status. For `https://` targets the leaf certificate's expiry is recorded with every check; `http://` targets store none.
+
+Validation is strict: unknown fields, empty or duplicate target names, non-absolute URLs, non-positive durations/worker counts, invalid methods, and header names that collide after whitespace trimming are all rejected. Try it:
 
 ```console
 $ go run ./cmd/pulsecheck -config missing.json
@@ -81,27 +139,64 @@ $ echo $?
 
 ## API
 
-Read-only JSON API; uses only `net/http` (Go 1.22 pattern routing) and writes nothing.
+Read-only endpoints; use only `net/http` (Go 1.22 pattern routing) and write nothing except through the store-backed handlers below.
 
 | Endpoint | Description |
 |---|---|
-| `GET /api/status` | Per target: the latest result (`last`), a summary of the last 30 outcomes (`recent`), and 24-hour counters (`stats`) |
+| `GET /api/status` | Per target: the latest result (`last`, with `cert_expires_at` for TLS targets), the recent outcome strip (`recent`), 24-hour counters (`stats`), and `uptime_24h`/`uptime_7d` percentages (`null` when the window holds no completed check; `skipped` never counts against uptime) |
 | `GET /api/history/{name}?limit=N` | A single target's most recent results, newest first; `limit` defaults to 50, capped at 500; unknown name → 404 |
+| `GET /healthz` | Liveness: `ok`, `version`, `uptime_seconds`, `last_write_age_seconds` (`null` when no check is stored yet) |
+| `GET /metrics` | Prometheus text exposition (see below) |
+| `GET /` | The dashboard: the embedded single-page status screen; polls `/api/status` every 5 seconds and links every card to its detail page |
+| `GET /targets/{name}` | Per-target detail page (server-rendered HTML): uptime figures, certificate expiry, duration sparkline; unknown name → 404 |
 
-Examples from a real local run:
+Examples from a real local run (the bundled demo config plus one ad-hoc `demo-tls` target pointing at `https://example.com` so the certificate surfaces are exercised):
 
 ```console
 $ curl -s http://localhost:8080/api/status
-{"checked_at":"2026-10-18T14:58:19Z","targets":[{"name":"demo-ok","url":"http://localhost:18081/ok","last":{"outcome":"up","status_code":200,"duration_ms":1,"at":"2026-10-18T14:58:15Z","error":""},"recent":["up","up"],"stats":{"up":2,"down":0,"timeout":0,"error":0,"skipped":0,"avg_duration_ms":2}},{"name":"demo-broken","url":"http://localhost:18081/broken","last":{"outcome":"down","status_code":500,"duration_ms":1,"at":"2026-10-18T14:58:15Z","error":""},"recent":["down","down"],"stats":{"up":0,"down":2,"timeout":0,"error":0,"skipped":0,"avg_duration_ms":2}},{"name":"demo-slow","url":"http://localhost:18081/slow","last":{"outcome":"skipped","status_code":0,"duration_ms":0,"at":"2026-10-18T14:58:14Z","error":"previous check still in flight"},"recent":["skipped","timeout","skipped","timeout"],"stats":{"up":0,"down":0,"timeout":2,"error":0,"skipped":2,"avg_duration_ms":2501}}]}
+{"checked_at":"2026-10-18T17:47:44Z","targets":[{"name":"demo-ok","url":"http://localhost:18081/ok","last":{"outcome":"up","status_code":200,"duration_ms":2,"at":"2026-10-18T17:47:44Z","error":"","cert_expires_at":null},"recent":["up","up","up","up","up","up"],"stats":{"up":6,"down":0,"timeout":0,"error":0,"skipped":0,"avg_duration_ms":1},"uptime_24h":100,"uptime_7d":100},{"name":"demo-broken","url":"http://localhost:18081/broken","last":{"outcome":"down","status_code":500,"duration_ms":1,"at":"2026-10-18T17:47:44Z","error":"","cert_expires_at":null},"recent":["down","down","down","down","down","down"],"stats":{"up":0,"down":6,"timeout":0,"error":0,"skipped":0,"avg_duration_ms":1},"uptime_24h":0,"uptime_7d":0},{"name":"demo-slow","url":"http://localhost:18081/slow","last":{"outcome":"skipped","status_code":0,"duration_ms":0,"at":"2026-10-18T17:47:40Z","error":"previous check still in flight","cert_expires_at":null},"recent":["skipped","timeout","skipped","timeout","skipped","timeout","skipped","timeout"],"stats":{"up":0,"down":0,"timeout":4,"error":0,"skipped":4,"avg_duration_ms":2501},"uptime_24h":0,"uptime_7d":0},{"name":"demo-tls","url":"https://example.com","last":{"outcome":"up","status_code":200,"duration_ms":18,"at":"2026-10-18T17:47:34Z","error":"","cert_expires_at":"2026-12-25T22:56:35Z"},"recent":["up","up"],"stats":{"up":2,"down":0,"timeout":0,"error":0,"skipped":0,"avg_duration_ms":50},"uptime_24h":100,"uptime_7d":100}]}
 ```
 
 ```console
 $ curl -s "http://localhost:8080/api/history/demo-slow?limit=3"
-[{"outcome":"skipped","status_code":0,"duration_ms":0,"at":"2026-10-18T14:58:14Z","error":"previous check still in flight"},{"outcome":"timeout","status_code":0,"duration_ms":5001,"at":"2026-10-18T14:58:11Z","error":"Get \"http://localhost:18081/slow\": context deadline exceeded"},{"outcome":"skipped","status_code":0,"duration_ms":0,"at":"2026-10-18T14:58:08Z","error":"previous check still in flight"}]
+[{"outcome":"skipped","status_code":0,"duration_ms":0,"at":"2026-10-18T17:47:40Z","error":"previous check still in flight","cert_expires_at":null},{"outcome":"timeout","status_code":0,"duration_ms":5000,"at":"2026-10-18T17:47:37Z","error":"Get \"http://localhost:18081/slow\": context deadline exceeded","cert_expires_at":null},{"outcome":"skipped","status_code":0,"duration_ms":0,"at":"2026-10-18T17:47:34Z","error":"previous check still in flight","cert_expires_at":null}]
 
 $ curl -s -o /dev/null -w "%{http_code}\n" "http://localhost:8080/api/history/unknown"
 404
 ```
+
+### Observability endpoints
+
+```console
+$ curl -s http://localhost:8080/healthz
+{"ok":true,"version":"v1.0.0","uptime_seconds":25.032,"last_write_age_seconds":0.031}
+```
+
+```console
+$ curl -s http://localhost:8080/metrics | head -11
+# HELP pulsecheck_info Build information for the running PulseCheck process; always 1.
+# TYPE pulsecheck_info gauge
+pulsecheck_info{version="v1.0.0"} 1
+# HELP pulsecheck_target_up Whether the target's most recent check was up (1) or not (0); a target that has never been checked reports 0.
+# TYPE pulsecheck_target_up gauge
+pulsecheck_target_up{target="demo-ok"} 1
+pulsecheck_target_up{target="demo-broken"} 0
+pulsecheck_target_up{target="demo-slow"} 0
+pulsecheck_target_up{target="demo-tls"} 1
+# HELP pulsecheck_check_duration_seconds Duration of the target's most recent check in seconds; absent until the first check.
+
+$ curl -s http://localhost:8080/metrics | grep '^pulsecheck_target_cert_expiry_days'
+pulsecheck_target_cert_expiry_days{target="demo-tls"} 68
+```
+
+The full exposition carries six metric families: `pulsecheck_info`, `pulsecheck_target_up`, `pulsecheck_check_duration_seconds`, `pulsecheck_check_results_24h` (a **windowed gauge**, not a counter — retention deletes rows, so a lifetime counter would decrease and mislead PromQL), `pulsecheck_target_cert_expiry_days` and `pulsecheck_last_check_timestamp_seconds`. Unknown values are absent series, never invented zeros; a target that has never been checked reports `target_up 0` (D31).
+
+```console
+$ curl -s http://localhost:8080/targets/demo-tls | grep -o 'cert expires in: <b>[^<]*'
+cert expires in: <b>68 days
+```
+
+The detail page shows the same figures as the dashboard card plus the sparkline; below 30 days the certificate line (and the dashboard card's certificate text) turns amber. The pages are fully self-contained: they render offline, with zero external resources.
 
 ## Integrating with another project
 
@@ -134,7 +229,7 @@ fetch('/api/status')
 
 ```json
 {
-  "checked_at": "2026-10-18T14:58:19Z",
+  "checked_at": "2026-10-18T17:47:44Z",
   "targets": [
     {
       "name": "demo-ok",
@@ -142,18 +237,21 @@ fetch('/api/status')
       "last": {
         "outcome": "up",
         "status_code": 200,
-        "duration_ms": 1,
-        "at": "2026-10-18T14:58:15Z",
-        "error": ""
+        "duration_ms": 2,
+        "at": "2026-10-18T17:47:44Z",
+        "error": "",
+        "cert_expires_at": null
       },
-      "recent": ["up", "up"],
-      "stats": { "up": 2, "down": 0, "timeout": 0, "error": 0, "skipped": 0, "avg_duration_ms": 2 }
+      "recent": ["up", "up", "up", "up", "up", "up"],
+      "stats": { "up": 6, "down": 0, "timeout": 0, "error": 0, "skipped": 0, "avg_duration_ms": 1 },
+      "uptime_24h": 100,
+      "uptime_7d": 100
     }
   ]
 }
 ```
 
-`outcome` values: `up`, `down`, `timeout`, `error`, `skipped`. `/api/history/{name}` returns an array carrying the same `outcome`/`status_code`/`duration_ms`/`at`/`error` fields (`at` is RFC3339 UTC).
+`outcome` values: `up`, `down`, `timeout`, `error`, `skipped`. `/api/history/{name}` returns an array carrying the same `outcome`/`status_code`/`duration_ms`/`at`/`error`/`cert_expires_at` fields (`at` is RFC3339 UTC; `cert_expires_at` is RFC3339 UTC or `null`).
 
 ## Architecture and decisions
 
@@ -161,20 +259,23 @@ fetch('/api/status')
 
 | Package | Responsibility |
 |---|---|
-| `cmd/pulsecheck` | The `main` that wires everything together; process lifecycle and graceful shutdown |
+| `cmd/pulsecheck` | The `main` that wires everything together; process lifecycle, graceful shutdown and version injection |
 | `cmd/demo-targets` | Local demo server built on `net/http`: `/ok` → 200, `/broken` → 500, `/slow` → delayed |
 | `internal/config` | Reads the JSON configuration, applies defaults, validates |
 | `internal/checker` | Single HTTP check + scheduler with a bounded worker pool |
-| `internal/store` | SQLite persistence (record, history, stats) and periodic cleanup |
-| `internal/api` | Read-only JSON API (`/api/status`, `/api/history/{name}`) |
-| `internal/web` | Single-page status dashboard embedded via `embed.FS` |
+| `internal/store` | SQLite persistence (record, history, stats, uptime, certificate expiry) and periodic cleanup |
+| `internal/api` | Read-only JSON API (`/api/status`, `/api/history/{name}`) and `/healthz` |
+| `internal/metrics` | Prometheus text exposition at `/metrics` |
+| `internal/web` | The single-page status dashboard and the per-target detail pages, embedded via `embed.FS` |
 
 ### Why these decisions?
 
 - **One timeout mechanism — the context.** `checker.Check` never sets `http.Client.Timeout`; the only deadline comes from the per-request `context.WithTimeout`. "Check timed out" and "shutdown cancellation" are therefore the same mechanism: at shutdown, in-flight checks are aborted immediately and there is no confusing double-deadline interaction.
 - **Per-target atomic in-flight lock.** Every round is claimed via `atomic.Bool.CompareAndSwap`; if the previous check is still running, the round is recorded as `skipped` with its reason instead of blocking. The queue never grows, and a delayed target never makes the others wait.
 - **The `Recorder` seam.** The `checker` package does not depend on `internal/store`; it hands results to a `Recorder` interface. The store implements that interface (compile-time proof: `var _ checker.Recorder = (*store.Store)(nil)`), and tests use `MemoryRecorder`. This makes it possible to test the scheduler without a real database.
-- **`modernc.org/sqlite` (pure Go).** No CGO required: it compiles statically with `CGO_ENABLED=0`, a small Alpine image is enough, and cross-compilation just works. `mattn/go-sqlite3` would require CGO.
+- **`modernc.org/sqlite` (pure Go).** No CGO required: it compiles statically with `CGO_ENABLED=0`, a small Alpine image is enough, and cross-compilation just works — the three release targets build on a single runner.
+- **Metrics are windowed gauges, not counters.** Retention deletes old rows, so a process-lifetime `_total` counter would decrease and mislead PromQL; the 24-hour result counts are therefore a gauge, and unknown values are excluded as absent series instead of invented zeros (D31).
+- **The tag is the release.** The version is one `-ldflags` value baked from the git tag (local builds honestly say `dev`); the release pipeline stays on runner-provided tooling (`go`, `tar`, `gh`) and re-runs the `-race` suite as a pre-publish guard (D33–D35).
 - **Dependency discipline.** The application code uses only the standard library plus a single pure-Go SQLite driver; JSON was chosen over YAML for configuration, so no extra dependency was born.
 
 Full decision log: [`docs/decisions.md`](docs/decisions.md) · Implementation plan: [`docs/PLAN.md`](docs/PLAN.md).
@@ -184,7 +285,12 @@ Full decision log: [`docs/decisions.md`](docs/decisions.md) · Implementation pl
 ```console
 $ make test        # go test -race ./...
 $ make vet         # go vet ./...
+$ make lint        # golangci-lint run with the repository's .golangci.yml
+$ go test -fuzz=FuzzParse -fuzztime 60s ./internal/config/    # native fuzzing
+$ go test -bench . -benchtime 200x -run '^$' ./internal/checker/ ./internal/store/ -benchmem
 ```
+
+CI ([`ci.yml`](.github/workflows/ci.yml)) runs four gates on every push to `main` (and to `faz-*` phase branches) and every pull request: `go vet` + `go test -race`, a 30 s fuzz step, a benchmark evidence step, and a separate `lint` job (golangci-lint pinned to v2.15.0, uncapped reporting, zero complaints). The [`release.yml`](.github/workflows/release.yml) pipeline re-runs the race suite as a guard before publishing any tag.
 
 Which test proves which promise:
 
@@ -195,10 +301,19 @@ Which test proves which promise:
 | Overlapping round recorded as `skipped` | `TestSkippedPersistedWhilePreviousInFlight`, `TestSchedulerSaturatedDispatch` |
 | Graceful shutdown, no goroutine leak | `TestSchedulerGracefulShutdown` |
 | Single-check classification (up/down/timeout/error) | `TestCheckClassification` |
+| Rich checks: headers, method, expected_status, redirects | `TestCheckRichRequest`, `TestCheckExpectedStatus`, `TestCheckExpectedStatusWithRedirects`, `TestSchedulerFollowRedirectsSelectsClient` |
+| TLS certificate capture + roundtrip | `TestCheckTLSCertificate`, `TestCertExpiresAtRoundtrip` |
+| Certificate amber treatment | `TestDetailPageCertWarningThreshold` (detail page), `TestIndexShowsUptimeAndCert` (dashboard script) |
 | Defaults/validation + bundled config files | `TestParse`, `TestExampleConfigLoads`, `TestDemoConfigLoads`, `TestDockerConfigLoads` |
 | Retention/cleanup | `TestDeleteOlderThan`, `TestStartRetention` |
+| Schema migration on an old database | `TestOpenMigratesOldSchema` |
+| Uptime math (`skipped` excluded) | `TestUptime` + the seeded mixes in `TestStatusShape` and `TestDetailPageChart` |
+| Metrics values, empty store, escaping, byte-stability | `TestMetricsBody`, `TestMetricsEmptyStore`, `TestMetricsEscaping`, `TestMetricsFormatIsStable` |
+| Health endpoint shape | `TestHealthzWithData`, `TestHealthzNoData` |
 | API schema/limits/404-405 | `TestStatusShape`, `TestHistory`, `TestMethodNotAllowed`, `TestUnknownPathIsNotFound` |
-| Embedded page + zero external resources | `TestIndexServed`, `TestNoExternalResources` |
+| Detail page + sparkline | `TestDetailPageChart`, `TestDetailPageCapsChartPoints`, `TestSparklinePoints` |
+| Embedded pages + zero external resources | `TestIndexServed`, `TestNoExternalResources` |
+| Fuzz contract (no panic; config XOR error) | `FuzzParse` (seeds run with every `go test`; CI fuzzes 30 s) |
 
 From a real `go test -race -count=1 -v ./internal/checker/` run (relevant lines only):
 
@@ -220,6 +335,27 @@ From a real `go test -race -count=1 -v ./internal/checker/` run (relevant lines 
 ok  	pulsecheck/internal/checker	8.728s
 ```
 
+Benchmark evidence (the same command CI runs; numbers are from one local machine — evidence, not a regression gate):
+
+```text
+$ go test -bench . -benchtime 200x -run '^$' ./internal/checker/ ./internal/store/ -benchmem
+BenchmarkCheck-8   	     200	     72996 ns/op	    5004 B/op	      55 allocs/op
+BenchmarkRecord-8    	     200	    186913 ns/op	     464 B/op	      11 allocs/op
+BenchmarkHistory-8   	     200	     68899 ns/op	   21498 B/op	     679 allocs/op
+BenchmarkLatest-8    	     200	     10943 ns/op	    1224 B/op	      41 allocs/op
+ok  	pulsecheck/internal/checker	0.449s
+ok  	pulsecheck/internal/store	0.602s
+```
+
+Fuzzing: the 60 s record from the robustness phase was **3,555,538 executions, 0 crashers**; a shorter re-run shows the shape:
+
+```text
+$ go test -fuzz=FuzzParse -fuzztime 10s ./internal/config/
+fuzz: elapsed: 11s, execs: 443205 (9082/sec), new interesting: 12 (total: 400)
+PASS
+ok  	pulsecheck/internal/config	11.391s
+```
+
 ## Docker
 
 The `Dockerfile` is multi-stage: two static binaries are built with `CGO_ENABLED=0` inside `golang:1.27-alpine` and copied into an `alpine`-based final image (Alpine instead of scratch: it provides `ca-certificates` and a shell, so `https://` targets and debugging work). The image runs as the non-root `pulsecheck` user; `ENTRYPOINT ["/pulsecheck"]`. `compose.yaml` defines two services (`demo-targets` + `pulsecheck`), both using the same image and selecting which binary to run via `entrypoint`/`command`.
@@ -237,7 +373,7 @@ A 72-second recording of a real run — three targets side by side:
 
 [![PulseCheck status dashboard](assets/demo.png)](assets/demo.mp4)
 
-▶ **[Watch the demo video: assets/demo.mp4](assets/demo.mp4)** (72 s, ~64 KB — visible in the video: `demo-ok` stays continuously `up`, `demo-broken` stays continuously `down`, and while `demo-slow` accumulates `skipped`/`timeout` it **never blocks the other targets**; in the dot strip the `skipped` reason shows as "previous check still in flight").
+▶ **[Watch the demo video: assets/demo.mp4](assets/demo.mp4)** (72 s, ~64 KB — visible in the video: `demo-ok` stays continuously `up`, `demo-broken` stays continuously `down`, and while `demo-slow` accumulates `skipped`/`timeout` it **never blocks the other targets**; in the dot strip the `skipped` reason shows as "previous check still in flight"). The recording predates the v1.1 observability additions; the cards now also carry an uptime line, per-card certificate text, and a link to each target's detail page.
 
 The video was produced entirely locally with a reproducible pipeline (€0): live stack via `make demo` + 36 screenshots every 2 s via Chrome headless CLI + ffmpeg H.264 assembly. (Decision log: D28.)
 
