@@ -103,6 +103,8 @@
 
 ### Faz 5 — Bütünleştirme, Docker, README
 
+> **Durum:** ✅ Tamamlandı (2026-10-18) — implementer: `deepseek-v4.1-flash` (D24–D26'yı kendisi yazdı); reviewer: `glm-5.3-flash` (APPROVE; 2 minor → D27 ile belgelenmiş kabul). Orkestratör doğrulaması: SIGINT → exit 0 sıralı loglarla; `make demo`; `docker compose up --build` canlı + non-root `uid=10001` + compose down temiz. README dürüstlük denetimi (3 komut birebir koşuldu) geçti.
+
 | Görev | İçerik | Kabul ölçütleri |
 |---|---|---|
 | **T5.1 main + graceful shutdown** | Tüm parçalar birleşir; `slog` ile yapılandırılmış log; `http.Server.Shutdown` + checker drain + store close sırası | Uçtan uca: `make run` ile üç demo hedefi panelde görünür; `Ctrl+C` sonrası süreç temiz çıkar, loglar shutdown adımlarını gösterir |
