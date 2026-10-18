@@ -1,0 +1,7 @@
+{
+  "targets": [
+    { "name": "example", "url": "https://example.com" },
+    { "name": "wikipedia", "url": "https://www.wikipedia.org", "interval": "15s" },
+    { "name": "golang", "url": "https://go.dev/", "timeout": "3s" }
+  ]
+}
