@@ -42,7 +42,7 @@ jobs:
             tar -C "dist/${name}" -czf "dist/${name}.tar.gz" pulsecheck
             rm -rf "dist/${name}"
           done
-          (cd dist && sha256sum ./*.tar.gz > checksums.txt)
+          (cd dist && sha256sum *.tar.gz > checksums.txt)
           ls -l dist
 
       - name: Publish GitHub release

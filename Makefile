@@ -19,7 +19,8 @@ vet:
 	go vet ./...
 
 # lint runs golangci-lint with the repository configuration (.golangci.yml).
-# CI runs the same pinned version in the lint job.
+# It uses whatever golangci-lint v2 is on PATH; CI is the authoritative gate
+# and pins the version (v2.15.0) in its lint job.
 lint:
 	golangci-lint run
 
