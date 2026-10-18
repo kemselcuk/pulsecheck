@@ -85,6 +85,8 @@
 
 ### Faz 3 — SQLite saklama
 
+> **Durum:** ✅ Tamamlandı (2026-10-18) — implementer: `deepseek-v4.1-flash`; reviewer: `glm-5.3-flash` (APPROVE; 1 minor → D21 yaması + 2 pin testi, orkestratör). Kanıt: `CGO_ENABLED=0` build, `-race` 5× (2 reviewer + 3 implementer), `go mod verify`, 400 satırlık eşzamanlı yazım testi.
+
 | Görev | İçerik | Kabul ölçütleri |
 |---|---|---|
 | **T3.1 Şema + store** | `results` tablosu: `id, target, started_at, outcome, status_code, duration_ms, error`; `(target, started_at)` indeksi; WAL modu; ekleme + sorgulama fonksiyonları | Testler: yaz/oku gidiş-dönüş; `skipped` dahil tüm outcome'lar saklanır; eşzamanlı yazımda `-race` temiz |
