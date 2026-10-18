@@ -122,7 +122,7 @@
 
 ### Faz 7 — Son kabul
 
-> **Durum:** ✅ Tamamlandı (2026-10-18) — final whole-repo review: `glm-5.3-flash` (ilk turda CHANGES REQUESTED: CI uzlaşması → gerçek durum kanıtıyla düzeltildi + D29 kaydı → delta review APPROVE). Reviewer hükmü: "codebase itself is finished, honest, and thoroughly pinned". Tek açık kalem: kullanıcı `workflow` scope verdiğinde CI aktivasyonu (K9 kısmi → tam).
+> **Durum:** ✅ Tamamlandı (2026-10-18) — final whole-repo review: `glm-5.3-flash` (ilk turda CHANGES REQUESTED: CI uzlaşması → gerçek durum kanıtıyla düzeltildi + D29 kaydı → delta review APPROVE). Reviewer hükmü: "codebase itself is finished, honest, and thoroughly pinned". CI aktivasyonu: kullanıcı scope'u verdi, `ci.yml` döndü, **ilk koşum yeşil** (run `39141315004`), badge README'de — K9 **tam**.
 
 | Görev | İçerik | Kabul ölçütleri |
 |---|---|---|

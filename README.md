@@ -2,6 +2,8 @@
 
 # PulseCheck
 
+[![CI](https://github.com/kemselcuk/pulsecheck/actions/workflows/ci.yml/badge.svg)](https://github.com/kemselcuk/pulsecheck/actions/workflows/ci.yml)
+
 PulseCheck, bir JSON yapılandırmasındaki HTTP hedeflerini belirli aralıklarla kontrol eden, sonuçları yerel bir SQLite dosyasında saklayan ve küçük bir JSON API ile tek sayfalık bir durum paneli sunan tek bir Go uygulamasıdır. Sınırlı bir worker pool ile eşzamanlı kontrol yapar; geciken bir hedef diğerlerini bloklamaz, aynı hedefte çakışan bir tur `skipped` olarak kaydedilir ve `SIGINT`/`SIGTERM` sonrası süreç temiz kapanır.
 
 Proje, Go'da **HTTP, eşzamanlılık ve hata yönetimini** gerçek ama küçük bir serviste göstermek için yazıldı: yalnızca standart kütüphane ve tek bir saf-Go SQLite sürücüsü; her anlamlı karar `docs/decisions.md`'de gerekçesiyle kayıtlı.
