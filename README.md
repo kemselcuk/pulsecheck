@@ -27,6 +27,7 @@ The project was written to demonstrate **HTTP, concurrency and error handling** 
 - **Zero-downtime config reload:** `SIGHUP` re-reads the configuration file and swaps the target list in place — added, removed and updated targets, in-flight checks never interrupted; `server`, `storage` or `defaults.workers` changes are rejected with a clear log line and need a restart (D41).
 - **Graceful shutdown:** `SIGINT`/`SIGTERM` → the checker stops, HTTP drains, the database closes; the log lines show the ordered steps.
 - **Fuzzing and benchmarks:** the config parser has a native fuzz target; CI runs a 30 s fuzz step and a benchmark evidence step on every push.
+- **Opt-in profiling:** `-pprof :6060` serves the Go debug endpoints on a dedicated mux — off by default, unauthenticated by design, bind it to localhost (D43).
 
 ## Quick start
 
@@ -370,6 +371,7 @@ Which test proves which promise:
 | Duration histogram + percentile estimation | `TestDurationHistogram`, `TestDurationPercentile`, `TestStats` |
 | Batched snapshot equivalence + scale | `TestStatusSnapshotMatchesPerTargetQueries`, `BenchmarkStatusReadPaths` |
 | Zero-downtime reload (swap, in-flight continuity, rejection policy) | `TestSchedulerReload`, `TestReloadConfig`, `TestDiffTargets`, `TestAtomicConcurrentSwapLoad` |
+| Opt-in pprof on a dedicated mux (app never exposes it) | `TestPprofMux` + the route-table 404 case |
 | Fuzz contract (no panic; config XOR error) | `FuzzParse` (seeds run with every `go test`; CI fuzzes 30 s) |
 
 From a real `go test -race -count=1 -v ./internal/checker/` run (relevant lines only):
@@ -428,6 +430,23 @@ fuzz: elapsed: 11s, execs: 443205 (9082/sec), new interesting: 12 (total: 400)
 PASS
 ok  	pulsecheck/internal/config	11.391s
 ```
+
+## Profiling
+
+An opt-in pprof server for local profiling; absent the flag, nothing listens:
+
+```console
+$ ./bin/pulsecheck -config config.json -pprof :6060
+time=... level=WARN msg="pprof enabled: the debug endpoints are UNAUTHENTICATED; bind them to localhost only" addr=:6060
+
+$ curl -s localhost:6060/debug/pprof/heap?debug=1 | head -1
+heap profile: 4: 4304 [4: 4305] @ heap/1048576
+
+$ curl -s -o /dev/null -w "%{http_code}\n" localhost:8080/debug/pprof/
+404
+```
+
+The debug endpoints live on a dedicated mux: the application handler never exposes `/debug/pprof`, the debug server drains together with the main one during shutdown, and a bind failure at startup is reported like any other listen error (D43). The endpoints are unauthenticated — keep the flag off in production or bind it to `127.0.0.1`.
 
 ## Docker
 

@@ -272,7 +272,7 @@ All acceptance criteria above checked + the demo video embedded in the README + 
 
 # v1.2 Phase 5 — pprof, opt-in (user-approved 2026-10-19)
 
-> **Status:** ☐ Pending
+> **Status:** ✅ Implementation complete (2026-10-19); independent review and merge follow.
 
 | Task | Content | Acceptance criteria |
 |---|---|---|

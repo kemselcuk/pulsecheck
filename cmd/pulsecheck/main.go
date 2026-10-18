@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"os/signal"
 	"sort"
@@ -86,6 +87,20 @@ func newHandler(live *config.Atomic, st *store.Store, version string, logger *sl
 	return mux
 }
 
+// pprofMux returns the DEDICATED mux of the opt-in pprof server (D43). The
+// debug endpoints are mounted explicitly so they can never appear on the
+// application mux or on DefaultServeMux; the pprof package's init-time
+// registration there is left unused.
+func pprofMux() *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/debug/pprof/", pprof.Index)
+	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+	return mux
+}
+
 // run wires every component, serves until SIGINT/SIGTERM, and returns the
 // process exit code. Keeping the wiring in run (instead of main) means the
 // deferred cleanup below runs before os.Exit, and the whole startup and
@@ -113,6 +128,7 @@ func run() int {
 	// custom file for real use. SIGHUP re-reads this same path.
 	configPath := flag.String("config", "config.demo.json", "path to the JSON configuration file")
 	showVersion := flag.Bool("version", false, "print the build version and exit")
+	pprofAddr := flag.String("pprof", "", `serve the Go pprof endpoints on this address (e.g. ":6060"); empty disables them`)
 	flag.Parse()
 	if *showVersion {
 		fmt.Println(versionOutput())
@@ -187,6 +203,28 @@ func run() int {
 		srvErr <- nil
 	}()
 
+	// The pprof server is opt-in through -pprof (D43): it serves a DEDICATED
+	// mux, so the application handler never exposes /debug/pprof, and it drains
+	// together with the main server. A bind failure is a startup error, like
+	// the main listener's.
+	var pprofSrv *http.Server
+	pprofErr := make(chan error, 1)
+	if *pprofAddr != "" {
+		pprofSrv = &http.Server{
+			Addr:              *pprofAddr,
+			Handler:           pprofMux(),
+			ReadHeaderTimeout: readHeaderTimeout,
+		}
+		go func() {
+			if err := pprofSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				pprofErr <- err
+				return
+			}
+			pprofErr <- nil
+		}()
+		logger.Warn("pprof enabled: the debug endpoints are UNAUTHENTICATED; bind them to localhost only", "addr", *pprofAddr)
+	}
+
 	logger.Info("pulsecheck started",
 		"version", version,
 		"addr", cfg.Server.Addr,
@@ -205,6 +243,12 @@ serve:
 		case err := <-srvErr:
 			if err != nil {
 				logger.Error("http server stopped", "err", err)
+				return 1
+			}
+			return 0
+		case err := <-pprofErr:
+			if err != nil {
+				logger.Error("pprof server stopped", "err", err)
 				return 1
 			}
 			return 0
@@ -233,6 +277,12 @@ serve:
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		logger.Error("shutdown: http server", "err", err)
 		return 1
+	}
+	if pprofSrv != nil {
+		if err := pprofSrv.Shutdown(shutdownCtx); err != nil {
+			logger.Error("shutdown: pprof server", "err", err)
+			return 1
+		}
 	}
 	logger.Info("shutdown: HTTP drained")
 

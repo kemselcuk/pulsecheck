@@ -58,6 +58,7 @@ func TestNewHandlerMountsEveryRoute(t *testing.T) {
 		{http.MethodGet, "/metrics", http.StatusOK, "pulsecheck_info{version=\"wired-version\"} 1"},
 		{http.MethodGet, "/targets/alpha", http.StatusOK, "<polyline"},
 		{http.MethodGet, "/targets/nope", http.StatusNotFound, ""},
+		{http.MethodGet, "/debug/pprof/", http.StatusNotFound, ""}, // opt-in only (D43)
 		{http.MethodPost, "/healthz", http.StatusMethodNotAllowed, `"method not allowed"`},
 		{http.MethodPost, "/metrics", http.StatusMethodNotAllowed, `"method not allowed"`},
 	}
@@ -266,5 +267,39 @@ func TestDiffTargets(t *testing.T) {
 	}
 	if len(updated) != 1 || updated[0] != "b" {
 		t.Errorf("updated = %v, want [b]", updated)
+	}
+}
+
+// TestPprofMux pins the dedicated mux of the opt-in pprof server (D43): the
+// standard debug endpoints respond, and nothing else does — the application
+// mux is never extended by it (pinned by the route-table 404 case).
+func TestPprofMux(t *testing.T) {
+	srv := httptest.NewServer(pprofMux())
+	t.Cleanup(srv.Close)
+
+	for _, path := range []string{"/debug/pprof/", "/debug/pprof/cmdline", "/debug/pprof/goroutine?debug=1"} {
+		resp, err := http.Get(srv.URL + path)
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("GET %s status = %d, want 200", path, resp.StatusCode)
+		}
+		if len(body) == 0 {
+			t.Errorf("GET %s returned an empty body", path)
+		}
+	}
+
+	// The dedicated mux is not an application server: unknown paths 404.
+	resp, err := http.Get(srv.URL + "/api/status")
+	if err != nil {
+		t.Fatalf("GET /api/status: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("GET /api/status on the pprof mux status = %d, want 404", resp.StatusCode)
 	}
 }
