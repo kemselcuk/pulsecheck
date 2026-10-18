@@ -1,6 +1,7 @@
 package store
 
 import (
+	"database/sql"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -47,6 +48,9 @@ func assertResult(t *testing.T, want, got checker.Result) {
 	}
 	if got.Err != want.Err {
 		t.Errorf("Err = %q, want %q", got.Err, want.Err)
+	}
+	if !got.CertExpiresAt.Equal(want.CertExpiresAt) {
+		t.Errorf("CertExpiresAt = %v, want %v", got.CertExpiresAt, want.CertExpiresAt)
 	}
 }
 
@@ -270,5 +274,217 @@ func TestRecordUsesProvidedStartedAt(t *testing.T) {
 	}
 	if stored != want.UnixMilli() {
 		t.Errorf("started_at = %d, want caller-provided %d", stored, want.UnixMilli())
+	}
+}
+
+// TestCertExpiresAtRoundtrip proves the certificate expiry survives a
+// Record/Latest/History round trip: a set value comes back as the same instant
+// in UTC, an unset value comes back as the zero time, and the raw column holds
+// Unix milliseconds or NULL accordingly.
+func TestCertExpiresAtRoundtrip(t *testing.T) {
+	s, _ := openStore(t, "cert_roundtrip.db")
+	base := time.Now().Add(-time.Minute).Truncate(time.Millisecond)
+
+	withCert := checker.Result{
+		TargetName:    "tls",
+		StartedAt:     base,
+		Duration:      15 * time.Millisecond,
+		Outcome:       checker.OutcomeUp,
+		StatusCode:    200,
+		CertExpiresAt: time.Now().Add(48 * time.Hour).UTC().Truncate(time.Millisecond),
+	}
+	if err := s.RecordResult(withCert); err != nil {
+		t.Fatalf("RecordResult(with cert): %v", err)
+	}
+
+	got, ok, err := s.Latest("tls")
+	if err != nil {
+		t.Fatalf("Latest(tls): %v", err)
+	}
+	if !ok {
+		t.Fatal("Latest(tls): not found")
+	}
+	if got.CertExpiresAt.IsZero() {
+		t.Fatal("CertExpiresAt is zero, want the recorded expiry")
+	}
+	if !got.CertExpiresAt.Equal(withCert.CertExpiresAt) {
+		t.Errorf("CertExpiresAt = %v, want the same instant %v", got.CertExpiresAt, withCert.CertExpiresAt)
+	}
+	if got.CertExpiresAt.Location() != time.UTC {
+		t.Errorf("CertExpiresAt location = %v, want UTC", got.CertExpiresAt.Location())
+	}
+	assertResult(t, withCert, got)
+
+	hist, err := s.History("tls", 10)
+	if err != nil {
+		t.Fatalf("History(tls): %v", err)
+	}
+	if len(hist) != 1 {
+		t.Fatalf("History(tls) returned %d rows, want 1", len(hist))
+	}
+	if !hist[0].CertExpiresAt.Equal(withCert.CertExpiresAt) {
+		t.Errorf("History CertExpiresAt = %v, want %v", hist[0].CertExpiresAt, withCert.CertExpiresAt)
+	}
+
+	withoutCert := checker.Result{
+		TargetName: "plain",
+		StartedAt:  base.Add(time.Second),
+		Duration:   5 * time.Millisecond,
+		Outcome:    checker.OutcomeUp,
+		StatusCode: 200,
+	}
+	if err := s.RecordResult(withoutCert); err != nil {
+		t.Fatalf("RecordResult(without cert): %v", err)
+	}
+	got, ok, err = s.Latest("plain")
+	if err != nil {
+		t.Fatalf("Latest(plain): %v", err)
+	}
+	if !ok {
+		t.Fatal("Latest(plain): not found")
+	}
+	if !got.CertExpiresAt.IsZero() {
+		t.Errorf("CertExpiresAt = %v, want the zero time when unset", got.CertExpiresAt)
+	}
+	assertResult(t, withoutCert, got)
+
+	// The raw storage shape: Unix ms for a set value, NULL for an unset one.
+	var storedCert sql.NullInt64
+	if err := s.db.QueryRow(`SELECT cert_expires_at FROM results WHERE target = 'tls'`).Scan(&storedCert); err != nil {
+		t.Fatalf("read cert_expires_at: %v", err)
+	}
+	if !storedCert.Valid || storedCert.Int64 != withCert.CertExpiresAt.UnixMilli() {
+		t.Errorf("stored cert_expires_at = %+v, want %d", storedCert, withCert.CertExpiresAt.UnixMilli())
+	}
+
+	var storedNull sql.NullInt64
+	if err := s.db.QueryRow(`SELECT cert_expires_at FROM results WHERE target = 'plain'`).Scan(&storedNull); err != nil {
+		t.Fatalf("read cert_expires_at: %v", err)
+	}
+	if storedNull.Valid {
+		t.Errorf("stored cert_expires_at = %d, want NULL when unset", storedNull.Int64)
+	}
+}
+
+// TestOpenMigratesOldSchema is the migration evidence test. It builds a database
+// with the pre-v1.1 results table (no cert_expires_at), seeds rows through raw
+// SQL, and then confirms that store.Open adds the column without touching the
+// existing data and that the full read/write API works afterwards. Reopening
+// again proves the migration is idempotent.
+func TestOpenMigratesOldSchema(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old_schema.db")
+
+	// 1. A database exactly as an older PulseCheck release would have left it.
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open raw db: %v", err)
+	}
+	if _, err := db.Exec(`CREATE TABLE results (
+		id          INTEGER PRIMARY KEY AUTOINCREMENT,
+		target      TEXT    NOT NULL,
+		started_at  INTEGER NOT NULL,
+		outcome     TEXT    NOT NULL CHECK (outcome IN ('up', 'down', 'timeout', 'error', 'skipped')),
+		status_code INTEGER,
+		duration_ms INTEGER,
+		error       TEXT
+	)`); err != nil {
+		t.Fatalf("create old schema: %v", err)
+	}
+	if _, err := db.Exec(`CREATE INDEX idx_results_target_time ON results (target, started_at)`); err != nil {
+		t.Fatalf("create old index: %v", err)
+	}
+
+	base := time.Now().Add(-time.Hour).Truncate(time.Millisecond)
+	legacy := []checker.Result{
+		{TargetName: "legacy", StartedAt: base, Duration: 5 * time.Millisecond, Outcome: checker.OutcomeUp, StatusCode: 200},
+		{TargetName: "legacy", StartedAt: base.Add(time.Second), Duration: 7 * time.Millisecond, Outcome: checker.OutcomeDown, StatusCode: 500},
+	}
+	for _, r := range legacy {
+		if _, err := db.Exec(
+			`INSERT INTO results (target, started_at, outcome, status_code, duration_ms, error) VALUES (?, ?, ?, ?, ?, ?)`,
+			r.TargetName, r.StartedAt.UnixMilli(), string(r.Outcome), r.StatusCode, r.Duration.Milliseconds(), r.Err,
+		); err != nil {
+			t.Fatalf("seed legacy row: %v", err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close raw db: %v", err)
+	}
+
+	// 2. Open must detect the missing column and ALTER it in.
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open(old db): %v", err)
+	}
+
+	has, err := s.hasColumn("results", "cert_expires_at")
+	if err != nil {
+		t.Fatalf("hasColumn after migration: %v", err)
+	}
+	if !has {
+		t.Fatal("cert_expires_at column missing after Open on an old database")
+	}
+
+	// 3. The seeded rows survive; the new column reads back as the zero time.
+	hist, err := s.History("legacy", 10)
+	if err != nil {
+		t.Fatalf("History after migration: %v", err)
+	}
+	if len(hist) != 2 {
+		t.Fatalf("History returned %d rows, want the 2 seeded rows", len(hist))
+	}
+	assertResult(t, legacy[1], hist[0]) // newest first
+	assertResult(t, legacy[0], hist[1])
+	for _, r := range hist {
+		if !r.CertExpiresAt.IsZero() {
+			t.Errorf("migrated row has CertExpiresAt = %v, want the zero time", r.CertExpiresAt)
+		}
+	}
+
+	// 4. RecordResult/Latest work against the migrated table, new column included.
+	fresh := checker.Result{
+		TargetName:    "legacy",
+		StartedAt:     base.Add(2 * time.Second),
+		Duration:      9 * time.Millisecond,
+		Outcome:       checker.OutcomeUp,
+		StatusCode:    200,
+		CertExpiresAt: time.Now().Add(24 * time.Hour).UTC().Truncate(time.Millisecond),
+	}
+	if err := s.RecordResult(fresh); err != nil {
+		t.Fatalf("RecordResult after migration: %v", err)
+	}
+	got, ok, err := s.Latest("legacy")
+	if err != nil {
+		t.Fatalf("Latest after migration: %v", err)
+	}
+	if !ok {
+		t.Fatal("Latest after migration: not found")
+	}
+	assertResult(t, fresh, got)
+
+	// 5. Idempotent: a further reopen changes nothing and loses no rows.
+	if err := s.Close(); err != nil {
+		t.Fatalf("close migrated db: %v", err)
+	}
+	again, err := Open(path)
+	if err != nil {
+		t.Fatalf("reopen migrated db: %v", err)
+	}
+	t.Cleanup(func() { _ = again.Close() })
+
+	hasAgain, err := again.hasColumn("results", "cert_expires_at")
+	if err != nil {
+		t.Fatalf("hasColumn after reopen: %v", err)
+	}
+	if !hasAgain {
+		t.Fatal("cert_expires_at column missing after reopening a migrated database")
+	}
+
+	var count int
+	if err := again.db.QueryRow(`SELECT COUNT(*) FROM results WHERE target = 'legacy'`).Scan(&count); err != nil {
+		t.Fatalf("count rows: %v", err)
+	}
+	if count != 3 { // 2 legacy + 1 fresh
+		t.Errorf("row count after reopen = %d, want 3", count)
 	}
 }

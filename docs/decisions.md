@@ -154,3 +154,12 @@ This log is CV/interview evidence: the *reason* each decision was made is tracea
 - **Decision:** `ci.yml` was not in the repo (untracked in HEAD, proven by a GitHub API 404); the file was parked locally via `.git/info/exclude`. Once the user granted the scope via `gh auth refresh -h github.com -s workflow`: the file was re-added, pushed, and the first green run proved it with a README badge. Until then K9 was **partial**: the CI file was ready and valid, awaiting run evidence.
 - **Rationale:** The decision-log discipline requires marking an unverified promise explicitly as "pending"; the final review's demand was in fact already satisfied — the record pins that with evidence. (Phase 7, 2026-10-18.)
 - **Closure:** The user granted the scope; `ci.yml` was restored (commit `cd1bb22`) and the first run returned green (run `39141315004`, 2026-10-18: vet + `go test -race` + build). The badge was added to the README; K9 is now **full**.
+
+---
+
+## Decisions made during v1.1
+
+### D30 — v1.1 scope lock and conscious deferrals
+- **Context:** In the v1.1 scoping round the user selected 10 items: `/metrics`, uptime %, `/healthz`, a sparkline detail page, TLS certificate tracking, richer HTTP check definitions, config fuzzing, a benchmark package, a release pipeline + golangci-lint, and the `v1.0.0` tag.
+- **Decision:** (a) The state-change webhook stays **out of scope** (the user confirmed again — the "not an alerting platform" boundary is preserved). (b) In the richer check definition, when `expected_status` is set the up rule is `status == expected`; unset, the 2xx rule applies — both judged on the FINAL response of the redirect chain. (c) The Phase 1 review's "minor" finding — in hand-built `config.Target` literals a `FollowRedirects bool` zero value means "do not follow" — is consciously deferred: the only consumer is the scheduler, always fed by `Parse` (default true); it becomes `*bool` when a second consumer appears. (d) `skipped` rounds are excluded from the uptime denominator: a round where no check ran is not an outage (implemented in Phase 2).
+- **Rationale:** Reasoned records of deferrals carry the D18/D27 discipline of v1.0 into v1.1; a combined pin test for "expected_status + redirects" (orchestrator) closed the review's nit. (v1.1 Phase 1, 2026-10-18.)

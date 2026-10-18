@@ -74,8 +74,13 @@ type job struct {
 type Scheduler struct {
 	cfg    config.Config
 	client *http.Client
-	rec    Recorder
-	logger *slog.Logger
+	// noRedirectClient is the twin of client that stops at the first response
+	// instead of following redirects. Redirect policy lives on the client, not
+	// in Check, so the scheduler owns both variants and picks one per target
+	// (see New and runJob).
+	noRedirectClient *http.Client
+	rec              Recorder
+	logger           *slog.Logger
 
 	jobs     chan job
 	inFlight []atomic.Bool
@@ -86,6 +91,12 @@ type Scheduler struct {
 // logger to one that discards all output, so callers cannot accidentally panic
 // on a missing dependency (the wiring layer passes both explicitly). rec is
 // required: a missing recorder is a wiring bug and must not be hidden.
+//
+// The injected client is the REDIRECTING default. A non-redirecting twin is
+// derived from it (same Transport and Jar, but a CheckRedirect returning
+// http.ErrUseLastResponse) so that a caller-supplied client such as
+// httptest's srv.Client() is honored for TLS and connection settings on both
+// paths; only the redirect policy differs.
 func New(cfg config.Config, client *http.Client, rec Recorder, logger *slog.Logger) *Scheduler {
 	if client == nil {
 		client = &http.Client{}
@@ -102,14 +113,28 @@ func New(cfg config.Config, client *http.Client, rec Recorder, logger *slog.Logg
 	}
 
 	return &Scheduler{
-		cfg:      cfg,
-		client:   client,
-		rec:      rec,
-		logger:   logger,
-		jobs:     make(chan job, workers),
-		inFlight: make([]atomic.Bool, len(cfg.Targets)),
-		workers:  workers,
+		cfg:              cfg,
+		client:           client,
+		noRedirectClient: withoutRedirects(client),
+		rec:              rec,
+		logger:           logger,
+		jobs:             make(chan job, workers),
+		inFlight:         make([]atomic.Bool, len(cfg.Targets)),
+		workers:          workers,
 	}
+}
+
+// withoutRedirects returns a copy of src that does not follow redirects: the
+// first response is returned as-is. The copy inherits src's Transport, Jar, and
+// Timeout, so TLS roots and connection pooling are unchanged. Returning the
+// last response (rather than an error) is what lets Check classify the
+// redirect status itself.
+func withoutRedirects(src *http.Client) *http.Client {
+	twin := *src
+	twin.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	return &twin
 }
 
 // Run starts the worker pool and one loop per target, then blocks until ctx is
@@ -158,13 +183,22 @@ func (s *Scheduler) worker(ctx context.Context, wg *sync.WaitGroup) {
 // runJob performs one check and records its result. The in-flight flag is
 // cleared only after the result is recorded, so the persist window is covered
 // by "in flight" too: a tick arriving mid-persist is skipped, not duplicated.
+//
+// Redirect policy is chosen here, per target: the redirecting client is the
+// default, and the non-redirecting twin is used when the target asked for
+// follow_redirects = false. Check itself is policy-agnostic.
 func (s *Scheduler) runJob(ctx context.Context, j job) {
 	// The per-request timeout is the only timeout mechanism; deriving it from
 	// ctx means shutdown cancels the check immediately.
 	checkCtx, cancel := context.WithTimeout(ctx, j.target.Timeout)
 	defer cancel()
 
-	res := Check(checkCtx, j.target, s.client)
+	client := s.client
+	if !j.target.FollowRedirects {
+		client = s.noRedirectClient
+	}
+
+	res := Check(checkCtx, j.target, client)
 
 	s.rec.Record(res)
 	s.inFlight[j.index].Store(false)
