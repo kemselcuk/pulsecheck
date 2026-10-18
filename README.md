@@ -385,13 +385,15 @@ The scale benchmark behind the batched read path (D40) — 200 targets × 24 h o
 
 ```text
 $ go test -bench BenchmarkStatusReadPaths -benchtime 3s -count 2 -run '^$' ./internal/store/ -benchmem
-BenchmarkStatusReadPaths/per-target-8   	3	1190541861 ns/op	4033696 B/op	121800 allocs/op
-BenchmarkStatusReadPaths/per-target-8   	3	1011239722 ns/op	4033696 B/op	121800 allocs/op
-BenchmarkStatusReadPaths/snapshot-8     	5	 650956350 ns/op	4035950 B/op	117448 allocs/op
-BenchmarkStatusReadPaths/snapshot-8     	5	 653926217 ns/op	4036523 B/op	117450 allocs/op
+BenchmarkStatusReadPaths/per-target-8         	3	1004106430 ns/op	4033637 B/op	121800 allocs/op
+BenchmarkStatusReadPaths/per-target-8         	3	1007409986 ns/op	4033722 B/op	121800 allocs/op
+BenchmarkStatusReadPaths/snapshot-8           	5	 642073783 ns/op	4036801 B/op	117456 allocs/op
+BenchmarkStatusReadPaths/snapshot-8           	5	 648142350 ns/op	4036804 B/op	117456 allocs/op
+BenchmarkStatusReadPaths/merged-aggregates-8  	4	 794109062 ns/op	 739356 B/op	 22849 allocs/op
+BenchmarkStatusReadPaths/merged-aggregates-8  	5	 670376717 ns/op	 738508 B/op	 22846 allocs/op
 ```
 
-The snapshot polls in ~0.65 s against ~1.0-1.2 s for the original per-target path; the naive five-statement full-scan batching that lost the measurement (~1.8 s) is recorded in D40.
+The snapshot polls in ~0.65 s against ~1.0 s for the original per-target path; the `merged-aggregates` sub-run isolates the phase that dominates its cost, and the naive five-statement full-scan batching that lost the measurement (~1.8 s) is recorded in D40.
 
 Fuzzing: the 60 s record from the robustness phase was **3,555,538 executions, 0 crashers**; a shorter re-run shows the shape:
 
