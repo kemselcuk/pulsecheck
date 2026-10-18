@@ -1,6 +1,7 @@
 package store
 
 import (
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -89,4 +90,123 @@ func BenchmarkLatest(b *testing.B) {
 			b.Fatalf("Latest: ok=%v err=%v", ok, err)
 		}
 	}
+}
+
+// BenchmarkStatusReadPaths compares the two ways a full dashboard poll can
+// read the store: the per-target path /api/status used before (Latest, a
+// 30-row History, Stats, and both uptime windows per target — four window
+// scans each) against the shipped StatusSnapshot, whose cost is dominated by
+// ONE merged aggregate scan per target (D40). A third sub-benchmark isolates
+// that merged phase, so its numbers are reproducible from this file alone. The
+// store is seeded once with 200 targets × 2880 rows — 24 h at the 30 s default
+// interval, ~576k rows — before any timer starts.
+func BenchmarkStatusReadPaths(b *testing.B) {
+	s := benchStore(b)
+	const (
+		targets = 200
+		rows    = 2880
+	)
+	names := seedStatusScale(b, s, targets, rows)
+
+	b.Run("per-target", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			if err := readPerTarget(s, names); err != nil {
+				b.Fatalf("per-target read: %v", err)
+			}
+		}
+	})
+
+	b.Run("snapshot", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			if _, err := s.StatusSnapshot(names); err != nil {
+				b.Fatalf("StatusSnapshot: %v", err)
+			}
+		}
+	})
+
+	b.Run("merged-aggregates", func(b *testing.B) {
+		now := time.Now().UnixMilli()
+		cutoff24h := now - snapshotWindow24h.Milliseconds()
+		cutoff7d := now - snapshotWindow7d.Milliseconds()
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			if _, err := s.snapshotAggregates(names, cutoff24h, cutoff7d); err != nil {
+				b.Fatalf("snapshotAggregates: %v", err)
+			}
+		}
+	})
+}
+
+// readPerTarget replicates the per-target read path /api/status used before
+// the snapshot, so the benchmark compares like with like.
+func readPerTarget(s *Store, names []string) error {
+	for _, name := range names {
+		if _, _, err := s.Latest(name); err != nil {
+			return err
+		}
+		if _, err := s.History(name, snapshotRecentLimit); err != nil {
+			return err
+		}
+		if _, err := s.Stats(name, snapshotWindow24h); err != nil {
+			return err
+		}
+		if _, _, err := s.Uptime(name, snapshotWindow24h); err != nil {
+			return err
+		}
+		if _, _, err := s.Uptime(name, snapshotWindow7d); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// seedStatusScale inserts targets × rows deterministic results spanning the
+// last 24 hours in one transaction — the direct-insert fast path is fine here
+// because the benchmark measures reads — and returns the target names.
+func seedStatusScale(b *testing.B, s *Store, targets, rows int) []string {
+	b.Helper()
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		b.Fatalf("begin: %v", err)
+	}
+	stmt, err := tx.Prepare(`INSERT INTO results
+		(target, started_at, outcome, status_code, duration_ms, error, cert_expires_at)
+		VALUES (?, ?, ?, ?, ?, ?, NULL)`)
+	if err != nil {
+		b.Fatalf("prepare: %v", err)
+	}
+
+	base := time.Now().Add(-snapshotWindow24h)
+	names := make([]string, 0, targets)
+	for ti := 0; ti < targets; ti++ {
+		name := fmt.Sprintf("scale-%03d", ti)
+		names = append(names, name)
+		for ri := 0; ri < rows; ri++ {
+			startedAt := base.Add(time.Duration(ri) * 30 * time.Second).UnixMilli()
+			outcome, status := "up", 200
+			switch {
+			case ri%200 == 199:
+				outcome, status = "down", 503
+			case ri%500 == 499:
+				outcome, status = "skipped", 0
+			}
+			duration := int64(5 + (ri*7)%120)
+			if outcome == "skipped" {
+				duration = 0
+			}
+			if _, err := stmt.Exec(name, startedAt, outcome, status, duration, ""); err != nil {
+				b.Fatalf("insert: %v", err)
+			}
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		b.Fatalf("commit: %v", err)
+	}
+	return names
 }

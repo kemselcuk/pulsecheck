@@ -303,6 +303,7 @@ fetch('/api/status')
 - **The `Recorder` seam.** The `checker` package does not depend on `internal/store`; it hands results to a `Recorder` interface. The store implements that interface (compile-time proof: `var _ checker.Recorder = (*store.Store)(nil)`), and tests use `MemoryRecorder`. This makes it possible to test the scheduler without a real database.
 - **`modernc.org/sqlite` (pure Go).** No CGO required: it compiles statically with `CGO_ENABLED=0`, a small Alpine image is enough, and cross-compilation just works — the three release targets build on a single runner.
 - **Metrics are windowed gauges, not counters.** Retention deletes old rows, so a process-lifetime `_total` counter would decrease and mislead PromQL; the 24-hour result counts are therefore a gauge, and unknown values are excluded as absent series instead of invented zeros (D31).
+- **Poll cost is rows visited, not statement count.** The dashboard read path was benchmarked at 200 targets: batching statements into full-history scans measured SLOWER than index-range reads, so the shipped `StatusSnapshot` merges every window aggregate into one index-range scan per target (D40) — measurement first, micro-optimizations second.
 - **The tag is the release.** The version is one `-ldflags` value baked from the git tag (local builds honestly say `dev`); the release pipeline stays on runner-provided tooling (`go`, `tar`, `gh`) and re-runs the `-race` suite as a pre-publish guard (D33–D35).
 - **Dependency discipline.** The application code uses only the standard library plus a single pure-Go SQLite driver; JSON was chosen over YAML for configuration, so no extra dependency was born.
 
@@ -345,6 +346,7 @@ Which test proves which promise:
 | Embedded pages + zero external resources | `TestIndexServed`, `TestNoExternalResources` |
 | Body assertions (contains/regex, cap, read errors) | `TestCheckBodyContains`, `TestCheckBodyRegex`, `TestCheckBodyTruncation`, `TestCheckBodyReadError`, `TestCheckBodyReadTimeout` |
 | Duration histogram + percentile estimation | `TestDurationHistogram`, `TestDurationPercentile`, `TestStats` |
+| Batched snapshot equivalence + scale | `TestStatusSnapshotMatchesPerTargetQueries`, `BenchmarkStatusReadPaths` |
 | Fuzz contract (no panic; config XOR error) | `FuzzParse` (seeds run with every `go test`; CI fuzzes 30 s) |
 
 From a real `go test -race -count=1 -v ./internal/checker/` run (relevant lines only):
@@ -378,6 +380,20 @@ BenchmarkLatest-8    	     200	     10943 ns/op	    1224 B/op	      41 allocs/op
 ok  	pulsecheck/internal/checker	0.449s
 ok  	pulsecheck/internal/store	0.602s
 ```
+
+The scale benchmark behind the batched read path (D40) — 200 targets × 24 h of 30 s rows (~576k rows) in one database, seeded before the timer starts:
+
+```text
+$ go test -bench BenchmarkStatusReadPaths -benchtime 3s -count 2 -run '^$' ./internal/store/ -benchmem
+BenchmarkStatusReadPaths/per-target-8         	3	1004106430 ns/op	4033637 B/op	121800 allocs/op
+BenchmarkStatusReadPaths/per-target-8         	3	1007409986 ns/op	4033722 B/op	121800 allocs/op
+BenchmarkStatusReadPaths/snapshot-8           	5	 642073783 ns/op	4036801 B/op	117456 allocs/op
+BenchmarkStatusReadPaths/snapshot-8           	5	 648142350 ns/op	4036804 B/op	117456 allocs/op
+BenchmarkStatusReadPaths/merged-aggregates-8  	4	 794109062 ns/op	 739356 B/op	 22849 allocs/op
+BenchmarkStatusReadPaths/merged-aggregates-8  	5	 670376717 ns/op	 738508 B/op	 22846 allocs/op
+```
+
+The snapshot polls in ~0.65 s against ~1.0 s for the original per-target path; the `merged-aggregates` sub-run isolates the phase that dominates its cost, and the naive five-statement full-scan batching that lost the measurement (~1.8 s) is recorded in D40.
 
 Fuzzing: the 60 s record from the robustness phase was **3,555,538 executions, 0 crashers**; a shorter re-run shows the shape:
 

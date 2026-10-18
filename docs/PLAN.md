@@ -237,3 +237,14 @@ All acceptance criteria above checked + the demo video embedded in the README + 
 |---|---|---|
 | **T1.1 Body assertions** | `expect_body_contains` / `expect_body_regex` per target (mutually exclusive, regex pre-compiled, rejected on HEAD): the body rule is judged only on accepted statuses; a mismatch → `down` with a describing `error`; the first 64 KiB are read (D38) | Live run: `body-mismatch` → `down`/HTTP 200/`body does not contain "maintenance"`, regex match → `up`, regex mismatch → `down`/`body does not match regexp "^ok$"`; 5 checker tests (contains/regex/cap/read-error/read-timeout) + config table tests + fuzz seeds/invariants |
 | **T1.2 Duration histogram + percentiles** | Windowed classic-bucket histogram of completed checks (skipped excluded) as `pulsecheck_check_duration_seconds_24h` (`_bucket`/`_sum`/`_count`); `p50_duration_ms`/`p95_duration_ms` bucket-ceiling estimates in `/api/status` (null when not expressible) (D39) | Live `/metrics` capture (`demo-slow`'s 4 timeouts in `le="10"`, sum 20.010 s) + `/api/status` (`p50: 10000, p95: 10000` for the timeout ceiling, `25/100` for the TLS target); store tests pin inclusive boundaries, cumulative counts, the sum, and both percentile paths incl. the open-bucket null; metrics/api tests updated |
+
+---
+
+# v1.2 Phase 2 — Batched status snapshot + scale proof (user-approved 2026-10-19)
+
+> **Status:** ✅ Complete (2026-10-19) — implementation + independent review (APPROVE; the reviewer reproduced the benchmark shape, adversarially falsified the equivalence with boundary/odd seeds, and confirmed the index usage via `EXPLAIN QUERY PLAN`). Findings closed: 2 minor (the merged-aggregate phase is now a committed sub-benchmark so its profile stays reproducible, and three code comments no longer claim target-count independence) and 1 nit (the speedup band widened to ~1.5-1.8×).
+
+| Task | Content | Evidence |
+|---|---|---|
+| **T2.1 Batched snapshot** | `store.StatusSnapshot`: one merged index-range scan per target for every window aggregate (counts, buckets, both uptimes, average with conditional-aggregate 24 h figures), plus bounded index reads for the newest result and the recent strip; `/api/status` and `/metrics` rewired to it (D40) | Equivalence with the per-target primitives pinned field by field (`TestStatusSnapshotMatchesPerTargetQueries`, plus the empty/zero-shape pin); the full suite and the metrics/api golden-style tests pass unchanged on the new path |
+| **T2.2 Scale proof** | `BenchmarkStatusReadPaths` at 200 targets × 24 h of 30 s rows (~576k rows): original per-target path vs the snapshot vs the merged aggregate phase alone, with the measured-bad five-statement full-scan variant recorded (D40) | Benchmark, 2 samples each: **snapshot ~0.64-0.65 s vs original ~1.0 s**; the merged phase alone ~0.67-0.79 s at ~23k allocs; the naive full-scan batching measured ~1.8 s — the slower design is documented with its numbers instead of shipped |

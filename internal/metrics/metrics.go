@@ -22,9 +22,6 @@ const (
 	// the charset is stated explicitly instead (see the package comment for the
 	// classic-vs-OpenMetrics decision).
 	contentMetrics = "text/plain; charset=utf-8"
-
-	// resultsWindow is the look-back period of pulsecheck_check_results_24h.
-	resultsWindow = 24 * time.Hour
 )
 
 // outcomeOrder fixes the order in which the outcome-labelled series of a target
@@ -133,21 +130,24 @@ func (t targetSample) count(o checker.Outcome) int {
 // is a real measurement (no completed check fell in the bucket), so the
 // histogram is emitted with zeros instead of being omitted.
 //
-// The store is queried live per scrape: at this scale that is simpler and always
-// consistent with the database, while an in-process registry is the documented
-// future option.
+// The store is queried live per scrape through the snapshot's measured read
+// path (D40): one merged aggregate scan per target plus bounded index reads, so
+// the scrape always reflects the database, while an in-process registry remains
+// the documented future option.
 func (s *server) render() (string, error) {
+	names := make([]string, 0, len(s.targets))
+	for _, t := range s.targets {
+		names = append(names, t.Name)
+	}
+	snap, err := s.store.StatusSnapshot(names)
+	if err != nil {
+		return "", fmt.Errorf("metrics: snapshot: %w", err)
+	}
+
 	samples := make([]targetSample, 0, len(s.targets))
 	for _, t := range s.targets {
-		last, ok, err := s.store.Latest(t.Name)
-		if err != nil {
-			return "", fmt.Errorf("metrics: latest for %q: %w", t.Name, err)
-		}
-		stats, err := s.store.Stats(t.Name, resultsWindow)
-		if err != nil {
-			return "", fmt.Errorf("metrics: stats for %q: %w", t.Name, err)
-		}
-		samples = append(samples, targetSample{name: t.Name, last: last, hasLast: ok, stats: stats})
+		sn := snap[t.Name]
+		samples = append(samples, targetSample{name: t.Name, last: sn.Latest, hasLast: sn.HasLatest, stats: sn.Stats})
 	}
 
 	var b strings.Builder
