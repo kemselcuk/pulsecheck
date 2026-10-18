@@ -15,6 +15,7 @@ The project was written to demonstrate **HTTP, concurrency and error handling** 
 - **Overlapping rounds are `skipped`:** while the previous check of a target is still running, the new round is skipped and recorded together with its reason.
 - **Rich check definitions:** per target — `method`, `expected_status` (only that code counts as `up`), request `headers`, and a `follow_redirects` switch.
 - **Body assertions:** `expect_body_contains` / `expect_body_regex` — a status-200 error page is not a pass; a mismatch is classified `down` with the reason in `error`, and only the first 64 KiB of the body are searched (D38).
+- **Per-target TLS trust:** `tls.ca_file` (extra roots, additive to the system pool) and `tls.insecure_skip_verify` for internal or self-signed endpoints (D42).
 - **Duration histogram:** a windowed histogram of completed-check durations in `/metrics` (classic buckets, 5 ms to 10 s) plus `p50_duration_ms` / `p95_duration_ms` bucket-ceiling estimates in `/api/status` (D39).
 - **24-hour retention:** old results are pruned periodically in the background (configurable).
 - **Single-page dashboard:** embedded HTML/CSS/JS; no external resources, works offline, polls `/api/status` every 5 seconds; each card links to its target's detail page.
@@ -115,6 +116,8 @@ Configuration is JSON, passed via the `-config` flag (default `config.demo.json`
 | `targets[].follow_redirects` | `true` | Follow the redirect chain before judging the final status |
 | `targets[].expect_body_contains` | unset | The target is `up` only if the body (first 64 KiB) contains this substring; a mismatch is `down` with the reason in `error` |
 | `targets[].expect_body_regex` | unset | Same, with a Go regular expression compiled at load time; mutually exclusive with `expect_body_contains`, and both are rejected on `HEAD` targets |
+| `targets[].tls.ca_file` | unset | PEM file with extra CA certificates for this target, **additive to the system roots**; read at load (a content change needs a restart — a reload compares the path) |
+| `targets[].tls.insecure_skip_verify` | `false` | Disables certificate verification for this target. Use it only for lab or self-signed environments — it exists to be explicit, not convenient |
 
 A richer definition (every field below is demonstrated in `config.example.json`):
 
@@ -128,12 +131,14 @@ A richer definition (every field below is demonstrated in `config.example.json`)
     { "name": "httpbin-post", "url": "https://httpbin.org/post",
       "method": "POST", "expected_status": 200, "interval": "120s" },
     { "name": "httpbin-legacy-redirect", "url": "https://httpbin.org/redirect-to?url=/status/200&status_code=301",
-      "follow_redirects": false, "expected_status": 301 }
+      "follow_redirects": false, "expected_status": 301 },
+    { "name": "internal-api", "url": "https://internal.example/healthz",
+      "tls": { "ca_file": "/etc/pulsecheck/internal-ca.pem" } }
   ]
 }
 ```
 
-With `expected_status: 500` a maintenance endpoint that answers 500 counts as `up`; with `follow_redirects: false` the 301 itself is the final status; with a body assertion an accepted status must satisfy the body rule too — only the first 64 KiB of the body are searched, and a status-200 error page is classified `down` with `body does not contain "…"` in `error` (D38). For `https://` targets the leaf certificate's expiry is recorded with every check; `http://` targets store none.
+With `expected_status: 500` a maintenance endpoint that answers 500 counts as `up`; with `follow_redirects: false` the 301 itself is the final status; with a body assertion an accepted status must satisfy the body rule too — only the first 64 KiB of the body are searched, and a status-200 error page is classified `down` with `body does not contain "…"` in `error` (D38). The `internal-api` entry is illustrative only (its CA file must exist on the machine that loads the configuration — the examples in `config.example.json` need no local files). With `tls.ca_file` the named PEM's roots are **added** to the system pool for that target; `tls.insecure_skip_verify` turns verification off for the target. For `https://` targets the leaf certificate's expiry is recorded with every check; `http://` targets store none.
 
 Validation is strict: unknown fields, empty or duplicate target names, non-absolute URLs, non-positive durations/worker counts, invalid methods, and header names that collide after whitespace trimming are all rejected. Try it:
 

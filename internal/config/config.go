@@ -80,6 +80,9 @@ type DefaultsConfig struct {
 //     response body to match it. At most one of the two body assertions can be
 //     configured; both are rejected together with Method "HEAD" (a HEAD
 //     response has no body).
+//   - TLS carries the per-target trust configuration: extra CA roots loaded
+//     from a PEM file (additive to the system roots) and an explicit
+//     verification opt-out (D42).
 type Target struct {
 	Name               string
 	URL                string
@@ -89,6 +92,7 @@ type Target struct {
 	FollowRedirects    bool
 	ExpectBodyContains string
 	ExpectBodyRegex    *regexp.Regexp
+	TLS                TLSConfig
 	Interval           time.Duration
 	Timeout            time.Duration
 }
@@ -125,6 +129,7 @@ type rawTarget struct {
 	FollowRedirects    *bool             `json:"follow_redirects"`
 	ExpectBodyContains *string           `json:"expect_body_contains"`
 	ExpectBodyRegex    *string           `json:"expect_body_regex"`
+	TLS                *rawTLS           `json:"tls"`
 	Interval           string            `json:"interval"`
 	Timeout            string            `json:"timeout"`
 }
@@ -220,6 +225,10 @@ func Parse(r io.Reader) (*Config, error) {
 		if err != nil {
 			return nil, err
 		}
+		tlsConfig, err := parseTLS(fmt.Sprintf("targets[%d].tls", i), rt.TLS)
+		if err != nil {
+			return nil, err
+		}
 
 		targetInterval, err := parseDuration(fmt.Sprintf("targets[%d].interval", i), rt.Interval, interval)
 		if err != nil {
@@ -239,6 +248,7 @@ func Parse(r io.Reader) (*Config, error) {
 			FollowRedirects:    parseFollowRedirects(rt.FollowRedirects),
 			ExpectBodyContains: bodyContains,
 			ExpectBodyRegex:    bodyRegex,
+			TLS:                tlsConfig,
 			Interval:           targetInterval,
 			Timeout:            targetTimeout,
 		})

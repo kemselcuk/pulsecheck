@@ -264,7 +264,7 @@ All acceptance criteria above checked + the demo video embedded in the README + 
 
 # v1.2 Phase 4 — TLS options: custom CA and opt-out verification (user-approved 2026-10-19)
 
-> **Status:** ☐ Pending
+> **Status:** ✅ Complete (2026-10-19) — implementation + independent review (APPROVE; the reviewer reproduced the live self-signed scenario on their own port and confirmed the SIGHUP path-change vs content-change semantics live). Findings closed: 1 minor (derived client pairs now close their idle connections when their runner is replaced or removed) and 1 nit (the non-following twin is exercised end to end against the self-signed host); 2 observations kept (a missing CA file rejects the whole reload — noted in D42; an identical-content-different-path change counts as an update — the conservative direction).
 
 | Task | Content | Acceptance criteria |
 |---|---|---|

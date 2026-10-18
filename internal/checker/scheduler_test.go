@@ -2,6 +2,7 @@ package checker
 
 import (
 	"context"
+	"crypto/x509"
 	"fmt"
 	"io"
 	"log/slog"
@@ -414,6 +415,73 @@ func waitForOutcome(t *testing.T, rec *MemoryRecorder, name string, outcome Outc
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatalf("target %q has fewer than %d %q results after 3s", name, want, outcome)
+}
+
+// TestSchedulerTLSClients covers the per-target TLS options (D42): a target
+// with extra roots verifies a self-signed server, insecure_skip_verify
+// connects without verification, and a plain target keeps failing with the
+// shared client — the same derived-client path every check uses.
+func TestSchedulerTLSClients(t *testing.T) {
+	srv := httptest.NewTLSServer(okHandler())
+	t.Cleanup(srv.Close)
+
+	pool := x509.NewCertPool()
+	pool.AddCert(srv.Certificate())
+
+	mk := func(name string, tlsCfg config.TLSConfig) config.Target {
+		return config.Target{Name: name, URL: srv.URL, Interval: time.Second, Timeout: 5 * time.Second, TLS: tlsCfg}
+	}
+	cfg := config.Config{Targets: []config.Target{
+		mk("plain", config.TLSConfig{}),
+		mk("ca", config.TLSConfig{CAFile: "test-ca.pem", CAPool: pool}),
+		mk("insecure", config.TLSConfig{InsecureSkipVerify: true}),
+	}}
+
+	// The scheduler is built with no injected client, so the plain target uses
+	// the default transport, which distrusts the self-signed certificate.
+	sched := New(cfg, nil, &MemoryRecorder{}, nil)
+
+	check := func(name string) Result {
+		t.Helper()
+		runner, ok := sched.runners[name]
+		if !ok {
+			t.Fatalf("no runner for %q", name)
+		}
+		if runner.client == sched.client {
+			t.Fatalf("%s: runner reuses the shared client, want a TLS-adjusted one", name)
+		}
+		if runner.noRedirectClient == sched.noRedirectClient {
+			t.Fatalf("%s: the non-following twin is not TLS-adjusted", name)
+		}
+		return Check(context.Background(), runner.target, runner.client)
+	}
+
+	caRes := check("ca")
+	if caRes.Outcome != OutcomeUp {
+		t.Errorf("ca target: Outcome = %q (err=%q), want up", caRes.Outcome, caRes.Err)
+	}
+	if caRes.CertExpiresAt.IsZero() {
+		t.Error("ca target: certificate not recorded")
+	}
+	// The non-following twin carries the same TLS adjustment: exercise it
+	// against the self-signed server directly.
+	caRunner := sched.runners["ca"]
+	if res := Check(context.Background(), caRunner.target, caRunner.noRedirectClient); res.Outcome != OutcomeUp {
+		t.Errorf("non-following twin: Outcome = %q (err=%q), want up", res.Outcome, res.Err)
+	}
+	if res := check("insecure"); res.Outcome != OutcomeUp {
+		t.Errorf("insecure target: Outcome = %q (err=%q), want up", res.Outcome, res.Err)
+	}
+
+	// The plain target keeps the shared client pair and stays an error against
+	// the self-signed server.
+	plain := sched.runners["plain"]
+	if plain.client != sched.client || plain.noRedirectClient != sched.noRedirectClient {
+		t.Error("plain target: client pair changed, want the shared one")
+	}
+	if res := Check(context.Background(), plain.target, plain.client); res.Outcome != OutcomeError {
+		t.Errorf("plain target: Outcome = %q, want error (self-signed server)", res.Outcome)
+	}
 }
 
 func TestSchedulerGracefulShutdown(t *testing.T) {

@@ -2,10 +2,10 @@ package checker
 
 import (
 	"context"
+	"crypto/tls"
 	"io"
 	"log/slog"
 	"net/http"
-	"reflect"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -58,13 +58,17 @@ type job struct {
 
 // targetRunner is the scheduling state of one target: its current definition
 // (immutable once stored — an update replaces the runner), the in-flight flag
-// (decision D4), and the stop channel of its ticker loop. The flag is a pointer
-// so an update can carry it across, keeping "previous check still in flight"
-// true while the target's definition changes (D41).
+// (decision D4), the carry-across stop channel of its ticker loop, and the
+// client pair the target's checks use (the shared pair, or a TLS-adjusted
+// derivative when the target configures per-target TLS trust — D42). The flag
+// is a pointer so an update can carry it across, keeping "previous check still
+// in flight" true while the target's definition changes (D41).
 type targetRunner struct {
-	target   config.Target
-	inFlight *atomic.Bool
-	stop     chan struct{}
+	target           config.Target
+	inFlight         *atomic.Bool
+	stop             chan struct{}
+	client           *http.Client
+	noRedirectClient *http.Client
 }
 
 // Scheduler runs periodic checks against every configured target using a fixed
@@ -132,24 +136,95 @@ func New(cfg config.Config, client *http.Client, rec Recorder, logger *slog.Logg
 		workers = 1
 	}
 
-	runners := make(map[string]*targetRunner, len(cfg.Targets))
-	for _, target := range cfg.Targets {
-		runners[target.Name] = &targetRunner{
-			target:   target,
-			inFlight: &atomic.Bool{},
-			stop:     make(chan struct{}),
-		}
-	}
-
-	return &Scheduler{
+	s := &Scheduler{
 		client:           client,
 		noRedirectClient: withoutRedirects(client),
 		rec:              rec,
 		logger:           logger,
 		jobs:             make(chan job, workers),
 		workers:          workers,
-		runners:          runners,
+		runners:          make(map[string]*targetRunner, len(cfg.Targets)),
 	}
+	for _, target := range cfg.Targets {
+		s.runners[target.Name] = s.newRunner(target, nil)
+	}
+	return s
+}
+
+// newRunner builds the scheduling state of one target: the client pair derived
+// from the target's TLS configuration (D42) and, when prev is non-nil (an
+// update carrying state across a reload, D41), prev's in-flight flag.
+func (s *Scheduler) newRunner(target config.Target, prev *targetRunner) *targetRunner {
+	client, noRedirect := s.clientsFor(target)
+	runner := &targetRunner{
+		target:           target,
+		inFlight:         &atomic.Bool{},
+		stop:             make(chan struct{}),
+		client:           client,
+		noRedirectClient: noRedirect,
+	}
+	if prev != nil {
+		runner.inFlight = prev.inFlight
+	}
+	return runner
+}
+
+// clientsFor derives the redirecting and non-following clients for one target.
+// Without per-target TLS settings the shared pair is reused, so the common
+// path allocates nothing; with them, a copy of the shared client gets a cloned
+// transport whose TLS config carries the target's extra roots and/or the
+// verification opt-out (D42). The copy preserves the shared CheckRedirect, Jar
+// and Timeout, which is what lets an injected client (httptest's, say) keep
+// working on both the following and the non-following path.
+func (s *Scheduler) clientsFor(t config.Target) (client, noRedirect *http.Client) {
+	if t.TLS.CAPool == nil && !t.TLS.InsecureSkipVerify {
+		return s.client, s.noRedirectClient
+	}
+
+	base := *s.client
+	base.Transport = transportWithTLS(s.client.Transport, t.TLS)
+	twin := withoutRedirects(&base)
+	return &base, twin
+}
+
+// closeIdleConnections releases the idle connections of a runner's DERIVED
+// client pair when it is replaced or removed. The shared pair is left alone:
+// other targets are still using it.
+func (s *Scheduler) closeIdleConnections(runner *targetRunner) {
+	if runner.client == s.client {
+		return
+	}
+	runner.client.CloseIdleConnections()
+	runner.noRedirectClient.CloseIdleConnections()
+}
+
+// transportWithTLS returns a transport that applies the target's TLS settings.
+// A clone of the base *http.Transport is adjusted (TLS config cloned first, so
+// a shared transport is never mutated); non-*http.Transport round trippers
+// cannot be cloned, so the default transport is the honest fallback base.
+func transportWithTLS(base http.RoundTripper, tlsConfig config.TLSConfig) http.RoundTripper {
+	var transport *http.Transport
+	if typed, ok := base.(*http.Transport); ok {
+		transport = typed.Clone()
+	} else {
+		transport = http.DefaultTransport.(*http.Transport).Clone()
+	}
+
+	cfg := transport.TLSClientConfig
+	if cfg == nil {
+		cfg = &tls.Config{}
+	} else {
+		cfg = cfg.Clone()
+	}
+	if tlsConfig.CAPool != nil {
+		cfg.RootCAs = tlsConfig.CAPool
+	}
+	if tlsConfig.InsecureSkipVerify {
+		// Deliberate, configured opt-out (D42); documented loudly in the README.
+		cfg.InsecureSkipVerify = true
+	}
+	transport.TLSClientConfig = cfg
+	return transport
 }
 
 // withoutRedirects returns a copy of src that does not follow redirects: the
@@ -221,27 +296,24 @@ func (s *Scheduler) Reload(cfg config.Config) {
 	for _, target := range cfg.Targets {
 		seen[target.Name] = struct{}{}
 		existing, ok := s.runners[target.Name]
-		if ok && reflect.DeepEqual(existing.target, target) {
+		if ok && config.TargetEqual(existing.target, target) {
 			continue
 		}
+		var prev *targetRunner
 		if ok {
+			s.closeIdleConnections(existing)
 			close(existing.stop)
+			// Carry state across the update so a check that is still running
+			// keeps guarding its target until it records (D41).
+			prev = existing
 		}
-		runner := &targetRunner{
-			target:   target,
-			inFlight: &atomic.Bool{},
-			stop:     make(chan struct{}),
-		}
-		if ok {
-			// Carry the flag across the update so a check that is still running
-			// keeps guarding its target until it records.
-			runner.inFlight = existing.inFlight
-		}
+		runner := s.newRunner(target, prev)
 		s.runners[target.Name] = runner
 		s.startLoop(runner)
 	}
 	for name, runner := range s.runners {
 		if _, ok := seen[name]; !ok {
+			s.closeIdleConnections(runner)
 			close(runner.stop)
 			delete(s.runners, name)
 		}
@@ -283,9 +355,9 @@ func (s *Scheduler) runJob(ctx context.Context, j job) {
 	checkCtx, cancel := context.WithTimeout(ctx, target.Timeout)
 	defer cancel()
 
-	client := s.client
+	client := j.runner.client
 	if !target.FollowRedirects {
-		client = s.noRedirectClient
+		client = j.runner.noRedirectClient
 	}
 
 	res := Check(checkCtx, target, client)
