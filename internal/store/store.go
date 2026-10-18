@@ -53,10 +53,13 @@ var schemaStatements = []string{
 
 // Stats aggregates the results of one target over a time window.
 //
-// The duration fields describe only the COMPLETED checks (up + down + timeout +
-// error); skipped rows are excluded everywhere, consistent with uptime (D30d):
-// a skipped row means no check ran, so it carries no duration and no outcome
-// signal for the latency figures.
+// The histogram fields (DurationBuckets, DurationSumMs) and the percentile
+// estimates describe only the COMPLETED checks (up + down + timeout + error):
+// a skipped row means no check ran, so it carries no duration signal
+// (D30d consistency). AvgDurationMs is the exception and keeps its historical
+// semantics: it averages the duration_ms column over ALL rows in the window —
+// including the 0 ms skipped rows — so it stays comparable with the values
+// recorded since v1.0.
 type Stats struct {
 	Up            int
 	Down          int

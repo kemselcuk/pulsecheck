@@ -475,6 +475,29 @@ func TestCheckBodyReadTimeout(t *testing.T) {
 	}
 }
 
+// TestCheckBodyMismatchKeepsCertificate pins D38's claim that the response's
+// TLS certificate is recorded even when the body assertion fails: the TLS
+// handshake completed, so the mismatch must not erase the expiry.
+func TestCheckBodyMismatchKeepsCertificate(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "not the expected page")
+	}))
+	t.Cleanup(srv.Close)
+
+	client := srv.Client()
+	t.Cleanup(client.CloseIdleConnections)
+
+	res := Check(context.Background(), config.Target{
+		Name: "tls-mismatch", URL: srv.URL, ExpectBodyContains: "welcome",
+	}, client)
+	if res.Outcome != OutcomeDown {
+		t.Errorf("Outcome = %q (err=%q), want %q", res.Outcome, res.Err, OutcomeDown)
+	}
+	if res.CertExpiresAt.IsZero() {
+		t.Error("CertExpiresAt is the zero time, want the certificate recorded despite the body mismatch")
+	}
+}
+
 // TestCheckTLSCertificate proves certificate tracking: a TLS response records
 // the leaf certificate's expiry, while a plain HTTP response records nothing.
 // Status and duration behave exactly as before in both cases.

@@ -238,7 +238,7 @@ func TestMetricsFormatIsStable(t *testing.T) {
 
 	body := scrape(t, cfg, st)
 
-	declared := map[string]bool{}
+	declared := map[string]string{} // family -> declared TYPE
 	lines := strings.Split(strings.TrimSuffix(body, "\n"), "\n")
 	for i, line := range lines {
 		switch {
@@ -256,11 +256,12 @@ func TestMetricsFormatIsStable(t *testing.T) {
 			}
 		case strings.HasPrefix(line, "# TYPE "):
 			rest := strings.TrimPrefix(line, "# TYPE ")
-			fam := strings.Fields(rest)[0]
-			if len(strings.Fields(rest)) != 2 {
+			fields := strings.Fields(rest)
+			if len(fields) != 2 {
 				t.Errorf("TYPE line %q must be \"# TYPE <name> <type>\"", line)
+				continue
 			}
-			declared[fam] = true
+			declared[fields[0]] = fields[1]
 		case line == "":
 			t.Errorf("unexpected blank line at %d", i+1)
 		default:
@@ -271,17 +272,18 @@ func TestMetricsFormatIsStable(t *testing.T) {
 				fam = fam[:idx]
 			}
 			// Histogram series belong to their base family: the TYPE line
-			// declares the base name and the _bucket/_sum/_count series follow
-			// it, so resolve them to the declared base before the lookup.
-			if !declared[fam] {
+			// declares the base name as a histogram and the _bucket/_sum/_count
+			// series follow it, so resolve them to that declared base — a
+			// suffix on a non-histogram family is a mistake, not a match.
+			if _, ok := declared[fam]; !ok {
 				for _, suffix := range []string{"_bucket", "_sum", "_count"} {
-					if base := strings.TrimSuffix(fam, suffix); base != fam && declared[base] {
+					if base := strings.TrimSuffix(fam, suffix); base != fam && declared[base] == "histogram" {
 						fam = base
 						break
 					}
 				}
 			}
-			if !declared[fam] {
+			if _, ok := declared[fam]; !ok {
 				t.Errorf("series %q at line %d appears before its TYPE", line, i+1)
 			}
 			if len(strings.Fields(line)) != 2 {

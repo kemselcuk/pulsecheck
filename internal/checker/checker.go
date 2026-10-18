@@ -153,9 +153,10 @@ func Check(ctx context.Context, t config.Target, client *http.Client) (res Resul
 
 	// Body handling. With a configured assertion the first maxBodyRead bytes of
 	// the body become part of the acceptance rules; reading them also serves
-	// keep-alive reuse. Without one the body is not needed, so only a small
-	// drain happens so the transport can reuse the connection instead of
-	// tearing it down.
+	// keep-alive reuse for bodies within the cap (a longer body is closed with
+	// the remainder unread, so that connection is not reused). Without an
+	// assertion the body is not needed, so only a small drain happens so the
+	// transport can reuse the connection instead of tearing it down.
 	if res.Outcome == OutcomeUp && (t.ExpectBodyContains != "" || t.ExpectBodyRegex != nil) {
 		body, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyRead))
 		if err != nil {
