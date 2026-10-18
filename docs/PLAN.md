@@ -214,11 +214,11 @@ All acceptance criteria above checked + the demo video embedded in the README + 
 
 # Post-v1.1 — Quick wins (user-approved 2026-10-18)
 
-> **Status:** ✅ Implementation complete (2026-10-18/19); independent review and merge follow.
+> **Status:** ✅ Complete (2026-10-18/19) — all eight items implemented and verified (live compose healthcheck, before/after second-signal evidence, dependency refresh with green gates, honesty-checked docs). Independent review: APPROVE (1 nit fixed — `start_interval` on the healthcheck, verified live: healthy in ~4 s; 2 observations, none actionable; every claimed number re-measured by the reviewer with its own runs).
 
 | Item | Content | Evidence |
 |---|---|---|
-| Compose healthcheck | The `pulsecheck` service probes its own `/healthz` via `wget` (30 s interval, 3 retries) | `docker compose up --build -d` → container **healthy after ~6 s**; the healthcheck log shows the real `/healthz` JSON |
+| Compose healthcheck | The `pulsecheck` service probes its own `/healthz` via `wget` (30 s interval, 5 s start interval, 3 retries) | `docker compose up --build -d` → container **healthy after ~5 s** (first live run; ~4 s after the review nit); the healthcheck log shows the real `/healthz` JSON |
 | `-version` flag | `pulsecheck <version>` prints the injected build version and exits 0 | `make build VERSION=v1.0.0 && ./bin/pulsecheck -version` → `pulsecheck v1.0.0`; pinned by `TestVersionOutput` |
 | Second-signal force exit (D27 closure) | `stop()` after the first signal restores the default disposition | slowloris-held drain: old binary exit 0 after 4.7 s vs. new binary killed (−2) 0.7 s after the first signal |
 | Repo visibility | 9 GitHub topics added; private vulnerability reporting enabled | `gh api` reads back both |
