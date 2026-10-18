@@ -85,3 +85,16 @@ Bu günlük CV/görüşme kanıtıdır: her kararın *neden* seçildiği buradan
 ### D16 — Git akışı: faz başına dal, görev başına commit
 - **Karar:** Kısa ömürlü faz dalları (`faz-0-iskelet` vb.), kabul sonrası `main`'e birleşme; her görev ayrı commit. CI `main` + PR'larda.
 - **Gerekçe:** Temel geçmiş okunur; PR geçmişi review kültürünün kanıtı. (Plan metnindeki "görev başına dal"dan faz ölçeğine sadeleştirildi — küçük görevler tek faz dalında ayrı commit olarak izleniyor.)
+
+---
+
+## Uygulama sırasında verilen kararlar
+
+### D17 — Boş string config alanları: varsayılana düş, hata verme
+- **Bağlam:** Faz 1 review'ında "minor" bulgu: `server.addr` / `storage.db_path` boş veya yalnız boşluk verilirse hata yerine varsayılana düşüyor; sayısal alanlarda ise açık 0 hata.
+- **Karar:** String alanlar için davranış kalır (boş = verilmemiş sayılır); davranış paket dokümanına ve kod içi yoruma yazıldı. Hedef `name` istisna: boş olamaz.
+- **Gerekçe:** "Katı hata" alternatifi kullanıcıyı gereksiz cezalandırır; JSON'da alanı hiç yazmamak ile `""` yazmak arasında anlamsal fark yaratmak küçük bir yapılandırmada kafa şişirici. Belirsiz davranış kabul edilemez — o yüzden belgelenerek çözüldü. (Faz 1 review turu, 2026-10-18.)
+
+### D18 — Review bulgularının ayrımı: minor/nit takibi
+- **Karar:** Review'da "minor" bulgu ya o turda düzeltilir ya da karar günlüğüne alınır; "nit"ler bilinçli olarak kabul edilir ve aşağıdakiler kayda değer olanlar not edilir: (a) iptal edilen `/slow` isteği logda 200 görünebilir (kozmetik), (b) bind hatası + eşzamanlı sinyal mikrosaniyelik pencerede birbirini maskeler (teori, kabul edildi).
+- **Gerekçe:** Küçük projede nit avına girmek teslimatı yavaşlatır; ama her kabul edilen bulgunun gerekçeli kaydı olmalı.

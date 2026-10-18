@@ -1,0 +1,10 @@
+{
+  "server": { "addr": ":8080" },
+  "storage": { "db_path": "data/demo.db" },
+  "defaults": { "interval": "10s" },
+  "targets": [
+    { "name": "demo-ok", "url": "http://localhost:8081/ok" },
+    { "name": "demo-broken", "url": "http://localhost:8081/broken" },
+    { "name": "demo-slow", "url": "http://localhost:8081/slow" }
+  ]
+}

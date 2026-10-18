@@ -66,6 +66,8 @@
 
 ### Faz 1 — Yapılandırma
 
+> **Durum:** ✅ Tamamlandı (2026-10-18) — implementer: `deepseek-v4.1-flash`; reviewer: `glm-5.3-flash` (APPROVE, 1 minor → D17 ile çözüldü); orkestratör doğrulaması: build/vet/test -race + gofmt + canlı smoke test (200/500/8.0s, SIGINT → exit 0).
+
 | Görev | İçerik | Kabul ölçütleri |
 |---|---|---|
 | **T1.1 Config yükleyici** | JSON config: `targets[]` (name, url, opsiyonel interval/timeout), `defaults` (interval=30s, timeout=5s, workers=4), `storage` (db_path, retention=24h), `server` (addr) | Testler: geçerli dosya okunur; **varsayılanlar uygulanır** (30s/5s/24h/4); geçersiz URL/boş name reddedilir; hedef override'ı kazanır |
