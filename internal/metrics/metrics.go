@@ -37,7 +37,7 @@ var outcomeOrder = []checker.Outcome{
 
 // server holds the read-only dependencies of the handlers.
 type server struct {
-	targets []config.Target
+	cfg     *config.Atomic
 	store   *store.Store
 	version string
 	logger  *slog.Logger
@@ -47,14 +47,15 @@ type server struct {
 //
 // A nil logger falls back to one that discards output. The handler is safe for
 // concurrent use and registers FULL paths ("GET /metrics"), so the caller mounts
-// it without a StripPrefix.
-func New(cfg config.Config, st *store.Store, version string, logger *slog.Logger) http.Handler {
+// it without a StripPrefix. The target list is read from the Atomic holder per
+// scrape (D41), so a SIGHUP reload becomes visible without a restart.
+func New(live *config.Atomic, st *store.Store, version string, logger *slog.Logger) http.Handler {
 	if logger == nil {
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 
 	s := &server{
-		targets: cfg.Targets,
+		cfg:     live,
 		store:   st,
 		version: version,
 		logger:  logger,
@@ -135,8 +136,9 @@ func (t targetSample) count(o checker.Outcome) int {
 // the scrape always reflects the database, while an in-process registry remains
 // the documented future option.
 func (s *server) render() (string, error) {
-	names := make([]string, 0, len(s.targets))
-	for _, t := range s.targets {
+	targets := s.cfg.Load().Targets
+	names := make([]string, 0, len(targets))
+	for _, t := range targets {
 		names = append(names, t.Name)
 	}
 	snap, err := s.store.StatusSnapshot(names)
@@ -144,8 +146,8 @@ func (s *server) render() (string, error) {
 		return "", fmt.Errorf("metrics: snapshot: %w", err)
 	}
 
-	samples := make([]targetSample, 0, len(s.targets))
-	for _, t := range s.targets {
+	samples := make([]targetSample, 0, len(targets))
+	for _, t := range targets {
 		sn := snap[t.Name]
 		samples = append(samples, targetSample{name: t.Name, last: sn.Latest, hasLast: sn.HasLatest, stats: sn.Stats})
 	}

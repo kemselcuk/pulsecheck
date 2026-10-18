@@ -33,7 +33,7 @@ func newStore(t *testing.T) *store.Store {
 func newServer(t *testing.T, cfg config.Config, st *store.Store) *httptest.Server {
 	t.Helper()
 
-	srv := httptest.NewServer(New(cfg, st))
+	srv := httptest.NewServer(New(config.NewAtomic(&cfg), st))
 	t.Cleanup(srv.Close)
 	return srv
 }

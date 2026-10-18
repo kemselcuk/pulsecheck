@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -49,10 +50,21 @@ func (m *MemoryRecorder) Snapshot() []Result {
 	return out
 }
 
-// job is one unit of work handed to a worker.
+// job is one unit of work handed to a worker. It carries the runner rather than
+// a position, so a reload can add and remove targets while jobs are queued.
 type job struct {
-	index  int // position in Scheduler.cfg.Targets, indexes the in-flight flag
-	target config.Target
+	runner *targetRunner
+}
+
+// targetRunner is the scheduling state of one target: its current definition
+// (immutable once stored — an update replaces the runner), the in-flight flag
+// (decision D4), and the stop channel of its ticker loop. The flag is a pointer
+// so an update can carry it across, keeping "previous check still in flight"
+// true while the target's definition changes (D41).
+type targetRunner struct {
+	target   config.Target
+	inFlight *atomic.Bool
+	stop     chan struct{}
 }
 
 // Scheduler runs periodic checks against every configured target using a fixed
@@ -69,10 +81,12 @@ type job struct {
 //     recorded as skipped instead of queued (decision D4).
 //   - Dispatch is non-blocking: if the pool is saturated the tick is recorded
 //     as skipped rather than stalling the ticker.
+//   - Reload replaces the target set at runtime (D41): added targets get a new
+//     loop, removed targets' loops stop without interrupting an in-flight
+//     check, and an updated target carries its in-flight flag across.
 //
 // The scheduler imports config only; persistence is behind Recorder.
 type Scheduler struct {
-	cfg    config.Config
 	client *http.Client
 	// noRedirectClient is the twin of client that stops at the first response
 	// instead of following redirects. Redirect policy lives on the client, not
@@ -82,9 +96,15 @@ type Scheduler struct {
 	rec              Recorder
 	logger           *slog.Logger
 
-	jobs     chan job
-	inFlight []atomic.Bool
-	workers  int
+	jobs    chan job
+	workers int
+
+	// mu guards runners and ctx; the per-runner fields are either immutable
+	// (target) or atomic (inFlight).
+	mu      sync.Mutex
+	ctx     context.Context
+	runners map[string]*targetRunner
+	wg      sync.WaitGroup
 }
 
 // New builds a Scheduler. A nil client falls back to &http.Client{} and a nil
@@ -112,15 +132,23 @@ func New(cfg config.Config, client *http.Client, rec Recorder, logger *slog.Logg
 		workers = 1
 	}
 
+	runners := make(map[string]*targetRunner, len(cfg.Targets))
+	for _, target := range cfg.Targets {
+		runners[target.Name] = &targetRunner{
+			target:   target,
+			inFlight: &atomic.Bool{},
+			stop:     make(chan struct{}),
+		}
+	}
+
 	return &Scheduler{
-		cfg:              cfg,
 		client:           client,
 		noRedirectClient: withoutRedirects(client),
 		rec:              rec,
 		logger:           logger,
 		jobs:             make(chan job, workers),
-		inFlight:         make([]atomic.Bool, len(cfg.Targets)),
 		workers:          workers,
+		runners:          runners,
 	}
 }
 
@@ -142,28 +170,88 @@ func withoutRedirects(src *http.Client) *http.Client {
 // in-flight checks to finish: each check runs with a context derived from ctx,
 // so cancellation aborts them at once. Run returns nil after a clean shutdown.
 //
-// Run must be called once per Scheduler.
+// Run must be called once per Scheduler; Reload may be called while it runs.
 func (s *Scheduler) Run(ctx context.Context) error {
-	s.logger.Info("scheduler started", "workers", s.workers, "targets", len(s.cfg.Targets))
-
-	var wg sync.WaitGroup
-
+	s.mu.Lock()
+	s.ctx = ctx
+	s.logger.Info("scheduler started", "workers", s.workers, "targets", len(s.runners))
 	for i := 0; i < s.workers; i++ {
-		wg.Add(1)
-		go s.worker(ctx, &wg)
+		s.wg.Add(1)
+		go s.worker(ctx, &s.wg)
 	}
-	for i, target := range s.cfg.Targets {
-		wg.Add(1)
-		go s.targetLoop(ctx, &wg, i, target)
+	for _, runner := range s.runners {
+		s.startLoop(runner)
 	}
+	s.mu.Unlock()
 
 	<-ctx.Done()
 	s.logger.Info("scheduler shutdown: dispatch stopped")
 
-	wg.Wait()
+	s.wg.Wait()
 	s.logger.Info("scheduler shutdown complete")
 
 	return nil
+}
+
+// Reload atomically replaces the target set with cfg.Targets (D41). It must be
+// called while Run is active; calls after shutdown has begun are ignored (the
+// only caller, the process lifecycle loop, never races this, but the guard
+// keeps the contract explicit).
+//
+// The swap never interrupts work: an in-flight check of a removed target
+// finishes and records normally, and an updated target keeps its in-flight
+// flag — the replacement loop's first tick is then recorded as skipped rather
+// than running a second check concurrently (D4 stays true across reloads). An
+// added target behaves exactly like one at startup: an immediate check, then
+// its interval.
+//
+// Only the target set is reloadable: defaults.workers sized the worker pool at
+// New, and the caller is responsible for rejecting other configuration changes
+// as restart-required (the reload policy in the wiring layer).
+func (s *Scheduler) Reload(cfg config.Config) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.ctx == nil || s.ctx.Err() != nil {
+		s.logger.Info("scheduler reload ignored: not running")
+		return
+	}
+
+	seen := make(map[string]struct{}, len(cfg.Targets))
+	for _, target := range cfg.Targets {
+		seen[target.Name] = struct{}{}
+		existing, ok := s.runners[target.Name]
+		if ok && reflect.DeepEqual(existing.target, target) {
+			continue
+		}
+		if ok {
+			close(existing.stop)
+		}
+		runner := &targetRunner{
+			target:   target,
+			inFlight: &atomic.Bool{},
+			stop:     make(chan struct{}),
+		}
+		if ok {
+			// Carry the flag across the update so a check that is still running
+			// keeps guarding its target until it records.
+			runner.inFlight = existing.inFlight
+		}
+		s.runners[target.Name] = runner
+		s.startLoop(runner)
+	}
+	for name, runner := range s.runners {
+		if _, ok := seen[name]; !ok {
+			close(runner.stop)
+			delete(s.runners, name)
+		}
+	}
+}
+
+// startLoop launches the ticker loop of runner; the caller holds s.mu.
+func (s *Scheduler) startLoop(runner *targetRunner) {
+	s.wg.Add(1)
+	go s.targetLoop(runner)
 }
 
 // worker pulls jobs from the shared queue until the scheduler context is done.
@@ -188,62 +276,67 @@ func (s *Scheduler) worker(ctx context.Context, wg *sync.WaitGroup) {
 // default, and the non-redirecting twin is used when the target asked for
 // follow_redirects = false. Check itself is policy-agnostic.
 func (s *Scheduler) runJob(ctx context.Context, j job) {
+	target := j.runner.target
+
 	// The per-request timeout is the only timeout mechanism; deriving it from
 	// ctx means shutdown cancels the check immediately.
-	checkCtx, cancel := context.WithTimeout(ctx, j.target.Timeout)
+	checkCtx, cancel := context.WithTimeout(ctx, target.Timeout)
 	defer cancel()
 
 	client := s.client
-	if !j.target.FollowRedirects {
+	if !target.FollowRedirects {
 		client = s.noRedirectClient
 	}
 
-	res := Check(checkCtx, j.target, client)
+	res := Check(checkCtx, target, client)
 
 	s.rec.Record(res)
-	s.inFlight[j.index].Store(false)
+	j.runner.inFlight.Store(false)
 }
 
 // targetLoop owns the cadence of a single target and never blocks on the pool.
-func (s *Scheduler) targetLoop(ctx context.Context, wg *sync.WaitGroup, index int, target config.Target) {
-	defer wg.Done()
+// It exits on shutdown, or when a reload replaces or removes its target.
+func (s *Scheduler) targetLoop(runner *targetRunner) {
+	defer s.wg.Done()
 
-	ticker := time.NewTicker(target.Interval)
+	ticker := time.NewTicker(runner.target.Interval)
 	defer ticker.Stop()
 
-	// Check once immediately so a freshly started scheduler reports a first
-	// result without waiting a full interval, then follow the cadence.
-	s.tick(ctx, index, target)
+	// Check once immediately so a freshly started (or newly added) target
+	// reports a first result without waiting a full interval, then follow the
+	// cadence.
+	s.tick(runner)
 	for {
 		select {
-		case <-ctx.Done():
+		case <-s.ctx.Done():
+			return
+		case <-runner.stop:
 			return
 		case <-ticker.C:
-			s.tick(ctx, index, target)
+			s.tick(runner)
 		}
 	}
 }
 
 // tick attempts to dispatch one check for a target. It refuses when the
 // previous check is still in flight and never blocks the calling ticker.
-func (s *Scheduler) tick(ctx context.Context, index int, target config.Target) {
-	flag := &s.inFlight[index]
-	if !flag.CompareAndSwap(false, true) {
-		s.recordSkip(target, reasonInFlight)
+func (s *Scheduler) tick(runner *targetRunner) {
+	if !runner.inFlight.CompareAndSwap(false, true) {
+		s.recordSkip(runner.target, reasonInFlight)
 		return
 	}
 
 	select {
-	case <-ctx.Done():
+	case <-s.ctx.Done():
 		// Shutting down: release the flag we just took; no check will run.
-		flag.Store(false)
-	case s.jobs <- job{index: index, target: target}:
+		runner.inFlight.Store(false)
+	case s.jobs <- job{runner: runner}:
 		// A worker now owns the flag and clears it once the result is recorded.
 	default:
 		// Pool saturated: no queue slot was available. Release the flag
 		// because no worker will clear it for us.
-		flag.Store(false)
-		s.recordSkip(target, reasonSaturated)
+		runner.inFlight.Store(false)
+		s.recordSkip(runner.target, reasonSaturated)
 	}
 }
 

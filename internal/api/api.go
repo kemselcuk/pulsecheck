@@ -100,9 +100,11 @@ type errorResponse struct {
 
 // apiServer holds the read-only dependencies of the handlers. It is a plain
 // struct rather than a global so tests can build it without binding a port.
+//
+// The configuration is read per request from the Atomic holder (D41), so a
+// SIGHUP reload becomes visible without restarting the server.
 type apiServer struct {
-	targets   []config.Target
-	byName    map[string]struct{}
+	cfg       *config.Atomic
 	store     *store.Store
 	version   string
 	startedAt time.Time
@@ -116,21 +118,17 @@ type apiServer struct {
 //
 // A nil logger falls back to one that discards output, so a caller cannot panic
 // on a missing dependency. The returned handler is safe for concurrent use.
-func New(cfg config.Config, st *store.Store, version string, logger *slog.Logger) http.Handler {
+func New(live *config.Atomic, st *store.Store, version string, logger *slog.Logger) http.Handler {
 	if logger == nil {
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 
 	s := &apiServer{
-		targets:   cfg.Targets,
-		byName:    make(map[string]struct{}, len(cfg.Targets)),
+		cfg:       live,
 		store:     st,
 		version:   version,
 		startedAt: time.Now(),
 		logger:    logger,
-	}
-	for _, t := range cfg.Targets {
-		s.byName[t.Name] = struct{}{}
 	}
 
 	mux := http.NewServeMux()
@@ -159,8 +157,9 @@ func (s *apiServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	names := make([]string, 0, len(s.targets))
-	for _, t := range s.targets {
+	names := make([]string, 0, len(s.cfg.Load().Targets))
+	targets := s.cfg.Load().Targets
+	for _, t := range targets {
 		names = append(names, t.Name)
 	}
 	snap, err := s.store.StatusSnapshot(names)
@@ -172,9 +171,9 @@ func (s *apiServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 	resp := statusResponse{
 		CheckedAt: time.Now().UTC().Format(time.RFC3339),
-		Targets:   make([]targetStatus, 0, len(s.targets)),
+		Targets:   make([]targetStatus, 0, len(targets)),
 	}
-	for _, t := range s.targets {
+	for _, t := range targets {
 		sn := snap[t.Name]
 		ts := targetStatus{Name: t.Name, URL: t.URL, Recent: make([]string, 0, len(sn.Recent))}
 		if sn.HasLatest {
@@ -243,7 +242,14 @@ func roundSeconds(seconds float64) float64 {
 // list.
 func (s *apiServer) handleHistory(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
-	if _, ok := s.byName[name]; !ok {
+	known := false
+	for _, t := range s.cfg.Load().Targets {
+		if t.Name == name {
+			known = true
+			break
+		}
+	}
+	if !known {
 		writeError(w, http.StatusNotFound, "target not found")
 		return
 	}

@@ -32,7 +32,7 @@ func newStore(t *testing.T) *store.Store {
 func scrape(t *testing.T, cfg config.Config, st *store.Store) string {
 	t.Helper()
 
-	srv := httptest.NewServer(New(cfg, st, "test-version", nil))
+	srv := httptest.NewServer(New(config.NewAtomic(&cfg), st, "test-version", nil))
 	t.Cleanup(srv.Close)
 
 	resp, err := http.Get(srv.URL + "/metrics")
@@ -295,7 +295,7 @@ func TestMetricsFormatIsStable(t *testing.T) {
 
 // TestMetricsMethodNotAllowed covers the JSON 405 with an Allow header.
 func TestMetricsMethodNotAllowed(t *testing.T) {
-	srv := httptest.NewServer(New(config.Config{}, newStore(t), "v", nil))
+	srv := httptest.NewServer(New(config.NewAtomic(&config.Config{}), newStore(t), "v", nil))
 	defer srv.Close()
 
 	resp, err := http.Post(srv.URL+"/metrics", "text/plain", nil)
@@ -324,7 +324,7 @@ func TestMetricsMethodNotAllowed(t *testing.T) {
 
 // TestMetricsUnknownPath covers the JSON 404 for every other path.
 func TestMetricsUnknownPath(t *testing.T) {
-	srv := httptest.NewServer(New(config.Config{}, newStore(t), "v", nil))
+	srv := httptest.NewServer(New(config.NewAtomic(&config.Config{}), newStore(t), "v", nil))
 	defer srv.Close()
 
 	resp, err := http.Get(srv.URL + "/other")
@@ -353,7 +353,7 @@ func TestMetricsStoreError(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
-	srv := httptest.NewServer(New(config.Config{Targets: []config.Target{{Name: "a", URL: "https://a/"}}}, st, "v", nil))
+	srv := httptest.NewServer(New(config.NewAtomic(&config.Config{Targets: []config.Target{{Name: "a", URL: "https://a/"}}}), st, "v", nil))
 	defer srv.Close()
 
 	resp, err := http.Get(srv.URL + "/metrics")
@@ -371,7 +371,7 @@ func TestMetricsStoreError(t *testing.T) {
 
 // TestMetricsNilStore covers the defensive guard for a missing dependency.
 func TestMetricsNilStore(t *testing.T) {
-	srv := httptest.NewServer(New(config.Config{}, nil, "v", nil))
+	srv := httptest.NewServer(New(config.NewAtomic(&config.Config{}), nil, "v", nil))
 	defer srv.Close()
 
 	resp, err := http.Get(srv.URL + "/metrics")

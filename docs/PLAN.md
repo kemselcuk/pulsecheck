@@ -248,3 +248,14 @@ All acceptance criteria above checked + the demo video embedded in the README + 
 |---|---|---|
 | **T2.1 Batched snapshot** | `store.StatusSnapshot`: one merged index-range scan per target for every window aggregate (counts, buckets, both uptimes, average with conditional-aggregate 24 h figures), plus bounded index reads for the newest result and the recent strip; `/api/status` and `/metrics` rewired to it (D40) | Equivalence with the per-target primitives pinned field by field (`TestStatusSnapshotMatchesPerTargetQueries`, plus the empty/zero-shape pin); the full suite and the metrics/api golden-style tests pass unchanged on the new path |
 | **T2.2 Scale proof** | `BenchmarkStatusReadPaths` at 200 targets × 24 h of 30 s rows (~576k rows): original per-target path vs the snapshot vs the merged aggregate phase alone, with the measured-bad five-statement full-scan variant recorded (D40) | Benchmark, 2 samples each: **snapshot ~0.64-0.65 s vs original ~1.0 s**; the merged phase alone ~0.67-0.79 s at ~23k allocs; the naive full-scan batching measured ~1.8 s — the slower design is documented with its numbers instead of shipped |
+
+---
+
+# v1.2 Phase 3 — Hot reload (SIGHUP) (user-approved 2026-10-19)
+
+> **Status:** ✅ Implementation complete (2026-10-19); independent review and merge follow.
+
+| Task | Content | Evidence |
+|---|---|---|
+| **T3.1 Reload plumbing** | `config.Atomic` holder (read per request by api/metrics/web); the SIGHUP loop in the lifecycle select; strict policy — reloadable is the resolved target list, `server`/`storage`/`defaults.workers` and parse failures are rejected with the running configuration intact; the log summarizes added/removed/updated (D41) | Live: same-pid swap `[alpha,beta]` → `[alpha,gamma]` with `uptime_seconds` growing across it, the `config reloaded added=[gamma] removed=[beta] updated=[alpha]` line, and a rejected `workers` change while the service kept serving; `TestReloadConfig`, `TestDiffTargets`, `TestAtomic*` |
+| **T3.2 Scheduler swap** | Name-keyed `targetRunner`s: removed targets' loops stop without interrupting their in-flight check, updated targets carry the in-flight flag onto the replacement loop, unchanged targets keep running, added targets check immediately (D41) | `TestSchedulerReload`: server-side max concurrency stays 1 across an in-flight update; added/removed/unchanged behaviour verified; full `-race` suite green |
