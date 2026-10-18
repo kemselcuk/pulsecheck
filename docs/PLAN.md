@@ -75,6 +75,8 @@
 
 ### Faz 2 — Checker: HTTP + eşzamanlılık
 
+> **Durum:** ✅ Tamamlandı (2026-10-18) — implementer: `deepseek-v4.1-flash` (1 ana tur + 2 takip turu); reviewer: `glm-5.3-flash` (ana tur APPROVE + minor bulgu → doygunluk testi eklendi → delta review APPROVE). Kanıt: `-race -count=200` doygunluk stress'i 200/200; tam takım 3× yeşil (implementer + orkestratör + reviewer bağımsız koştu).
+
 | Görev | İçerik | Kabul ölçütleri |
 |---|---|---|
 | **T2.1 Tek kontrol** | `net/http` istek: istek başına `context.WithTimeout`, süre ölçümü, sınıflandırma: `up / down / timeout / error` (+status code, hata nedeni) | httptest ile: 200→`up`, 500→`down`, timeout→`timeout`, bağlantı hatası→`error`; süre kaydı doğru; goroutine sızıntısı yok |

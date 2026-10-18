@@ -98,3 +98,13 @@ Bu günlük CV/görüşme kanıtıdır: her kararın *neden* seçildiği buradan
 ### D18 — Review bulgularının ayrımı: minor/nit takibi
 - **Karar:** Review'da "minor" bulgu ya o turda düzeltilir ya da karar günlüğüne alınır; "nit"ler bilinçli olarak kabul edilir ve aşağıdakiler kayda değer olanlar not edilir: (a) iptal edilen `/slow` isteği logda 200 görünebilir (kozmetik), (b) bind hatası + eşzamanlı sinyal mikrosaniyelik pencerede birbirini maskeler (teori, kabul edildi).
 - **Gerekçe:** Küçük projede nit avına girmek teslimatı yavaşlatır; ama her kabul edilen bulgunun gerekçeli kaydı olmalı.
+
+### D19 — Zamanlama testleri invariant iddia eder, çizelge (interleaving) zorlamaz
+- **Bağlam:** Faz 2'de "worker pool doygunluğu" dalını test ederken ilk taslak, tam 1 skip bekliyordu; 200 koşumlu stress bunun ~%17 ihtimalle 2 skip olabildiğini gösterdi (worker-vs-tick goroutine planlama yarışı). İlk düzeltme denemesi private alan kurcalayarak çizelgeyi zorladı — reddedildi.
+- **Karar:** Test, davranış garantisi olan invariantı iddia eder: toplam kayıt tam 3; doygunluk skip'i 1–2 arası; kabul edilenlerin tamamı up/200; başka outcome yok. Private state erişimi yasak; `Run` startup'ı testin kendisinde kalır. Her iki çizelge de `-race -count=200` ile kanıtlanır.
+- **Gerekçe:** Scheduler'ın borcu "kapasite-bounded kabul + taşarsa skip"tir; worker'ın buffer'dan mı yoksa doğrudan kanaldan mı aldığı sözleşmenin parçası değildir. Çizelgeyi zorlayan testler kırılgandır ve CV'de kusur olarak okunur. (Faz 2 takip turu, 2026-10-18.)
+
+### D20 — Shutdown'da iptal edilen kontroller: `error`/"context canceled" olarak kaydedilir
+- **Bağlam:** Graceful shutdown in-flight kontrolü context iptaliyle keser; bu sonucun kaydedilip kaydedilmeyeceği belirsizdi.
+- **Karar:** Kaydedilir (outcome `error`, Err "context canceled"); kuyu-şekillendirme (filtreleme) gerekiyorsa store/UI katmanında yapılır. Checker bilgiyi gizlemez.
+- **Gerekçe:** Kayıt doğrudur (kontrol gerçekten yarıda kaldı); checker'ın içinden filtrelemek bilgi kaybıdır ve test edilebilirliği düşürür. Faz 2 review kararı.
