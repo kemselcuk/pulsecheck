@@ -31,7 +31,11 @@ jobs:
         run: go test -fuzz=FuzzParse -fuzztime 30s ./internal/config/ -run '^$'
 
       - name: Bench
-        run: go test -bench . -benchtime 200x -run '^$' ./internal/checker/ ./internal/store/ -benchmem
+        # The four fast benchmarks explicitly: the `-bench .` wildcard would
+        # also run BenchmarkStatusReadPaths, whose 576k-row seeding and 200
+        # fixed iterations add ~8 minutes per run. The scale benchmark has its
+        # own documented command (see the README / D40).
+        run: go test -bench '^(BenchmarkCheck|BenchmarkRecord|BenchmarkHistory|BenchmarkLatest)$' -benchtime 200x -run '^$' ./internal/checker/ ./internal/store/ -benchmem
 
       - name: Build
         run: go build ./...

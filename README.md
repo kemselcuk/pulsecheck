@@ -372,7 +372,7 @@ ok  	pulsecheck/internal/checker	8.728s
 Benchmark evidence (the same command CI runs; numbers are from one local machine — evidence, not a regression gate):
 
 ```text
-$ go test -bench . -benchtime 200x -run '^$' ./internal/checker/ ./internal/store/ -benchmem
+$ go test -bench '^(BenchmarkCheck|BenchmarkRecord|BenchmarkHistory|BenchmarkLatest)$' -benchtime 200x -run '^$' ./internal/checker/ ./internal/store/ -benchmem
 BenchmarkCheck-8   	     200	     72996 ns/op	    5004 B/op	      55 allocs/op
 BenchmarkRecord-8    	     200	    186913 ns/op	     464 B/op	      11 allocs/op
 BenchmarkHistory-8   	     200	     68899 ns/op	   21498 B/op	     679 allocs/op
@@ -380,6 +380,8 @@ BenchmarkLatest-8    	     200	     10943 ns/op	    1224 B/op	      41 allocs/op
 ok  	pulsecheck/internal/checker	0.449s
 ok  	pulsecheck/internal/store	0.602s
 ```
+
+(The benchmark names are spelled out — exactly what CI runs — because the `-bench .` wildcard would also pick up the scale benchmark below, which takes minutes by design.)
 
 The scale benchmark behind the batched read path (D40) — 200 targets × 24 h of 30 s rows (~576k rows) in one database, seeded before the timer starts:
 
