@@ -7,19 +7,36 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 )
 
 // Defaults applied when a configuration field is omitted.
 const (
-	DefaultAddr      = ":8080"
-	DefaultDBPath    = "pulsecheck.db"
-	DefaultRetention = 24 * time.Hour
-	DefaultInterval  = 30 * time.Second
-	DefaultTimeout   = 5 * time.Second
-	DefaultWorkers   = 4
+	DefaultAddr            = ":8080"
+	DefaultDBPath          = "pulsecheck.db"
+	DefaultRetention       = 24 * time.Hour
+	DefaultInterval        = 30 * time.Second
+	DefaultTimeout         = 5 * time.Second
+	DefaultWorkers         = 4
+	DefaultMethod          = "GET"
+	DefaultFollowRedirects = true
 )
+
+// ExpectedStatusMin and ExpectedStatusMax bound an explicitly configured
+// expected_status. The whole IANA HTTP status code range is allowed, not just
+// the codes PulseCheck itself ever returns.
+const (
+	ExpectedStatusMin = 100
+	ExpectedStatusMax = 599
+)
+
+// methodPattern is the accepted shape of an HTTP method after normalization.
+// The configuration is a static file, so an unusual but valid token such as
+// "M-SEARCH" is rejected rather than guessed at; ^[A-Z]+$ keeps the vocabulary
+// predictable and still covers every common method (GET, POST, HEAD, ...).
+var methodPattern = regexp.MustCompile(`^[A-Z]+$`)
 
 // Config is a fully resolved and validated PulseCheck configuration.
 type Config struct {
@@ -47,12 +64,25 @@ type DefaultsConfig struct {
 	Workers  int
 }
 
-// Target is a single monitored endpoint with concrete interval and timeout.
+// Target is a single monitored endpoint with concrete request, interval, and
+// timeout values.
+//
+// The request shape mirrors the richer HTTP check definition:
+//   - Method is the HTTP method, normalized to uppercase (default "GET").
+//   - ExpectedStatus, when non-zero, is the only status code that counts as up;
+//     when zero the 2xx rule applies (any 2xx is up).
+//   - Headers are sent with every request; a nil map means no extra headers.
+//   - FollowRedirects controls whether the HTTP redirect chain is followed
+//     (default true).
 type Target struct {
-	Name     string
-	URL      string
-	Interval time.Duration
-	Timeout  time.Duration
+	Name            string
+	URL             string
+	Method          string
+	ExpectedStatus  int
+	Headers         map[string]string
+	FollowRedirects bool
+	Interval        time.Duration
+	Timeout         time.Duration
 }
 
 // rawConfig mirrors the on-disk JSON shape before defaults are applied.
@@ -79,10 +109,14 @@ type rawDefaults struct {
 }
 
 type rawTarget struct {
-	Name     string `json:"name"`
-	URL      string `json:"url"`
-	Interval string `json:"interval"`
-	Timeout  string `json:"timeout"`
+	Name            string            `json:"name"`
+	URL             string            `json:"url"`
+	Method          string            `json:"method"`
+	ExpectedStatus  *int              `json:"expected_status"`
+	Headers         map[string]string `json:"headers"`
+	FollowRedirects *bool             `json:"follow_redirects"`
+	Interval        string            `json:"interval"`
+	Timeout         string            `json:"timeout"`
 }
 
 // Parse decodes, defaults, and validates a configuration from r.
@@ -160,6 +194,19 @@ func Parse(r io.Reader) (*Config, error) {
 			return nil, fmt.Errorf("config: targets[%d].url %q must be an absolute http or https URL", i, rt.URL)
 		}
 
+		method, err := parseMethod(fmt.Sprintf("targets[%d].method", i), rt.Method)
+		if err != nil {
+			return nil, err
+		}
+		expectedStatus, err := parseExpectedStatus(fmt.Sprintf("targets[%d].expected_status", i), rt.ExpectedStatus)
+		if err != nil {
+			return nil, err
+		}
+		headers, err := parseHeaders(fmt.Sprintf("targets[%d].headers", i), rt.Headers)
+		if err != nil {
+			return nil, err
+		}
+
 		targetInterval, err := parseDuration(fmt.Sprintf("targets[%d].interval", i), rt.Interval, interval)
 		if err != nil {
 			return nil, err
@@ -170,10 +217,14 @@ func Parse(r io.Reader) (*Config, error) {
 		}
 
 		cfg.Targets = append(cfg.Targets, Target{
-			Name:     name,
-			URL:      targetURL,
-			Interval: targetInterval,
-			Timeout:  targetTimeout,
+			Name:            name,
+			URL:             targetURL,
+			Method:          method,
+			ExpectedStatus:  expectedStatus,
+			Headers:         headers,
+			FollowRedirects: parseFollowRedirects(rt.FollowRedirects),
+			Interval:        targetInterval,
+			Timeout:         targetTimeout,
 		})
 	}
 
@@ -209,4 +260,63 @@ func parseDuration(field, value string, def time.Duration) (time.Duration, error
 	}
 
 	return d, nil
+}
+
+// parseMethod normalizes an optional HTTP method: an empty (or
+// whitespace-only) value falls back to DefaultMethod, and anything else is
+// trimmed, upper-cased, and validated against methodPattern. Lower-case input
+// is therefore accepted and normalized to its upper-case form.
+func parseMethod(field, value string) (string, error) {
+	normalized := strings.ToUpper(strings.TrimSpace(value))
+	if normalized == "" {
+		return DefaultMethod, nil
+	}
+	if !methodPattern.MatchString(normalized) {
+		return "", fmt.Errorf("config: %s %q is invalid, must match ^[A-Z]+$ after normalization", field, normalized)
+	}
+	return normalized, nil
+}
+
+// parseExpectedStatus resolves the optional expected_status. A nil pointer
+// means "not configured" and yields 0 (the classifier then applies the 2xx
+// rule). Because the field is a pointer, an explicit 0 is distinguishable from
+// an omitted value and is rejected by the 100..599 range check instead of
+// silently disabling the rule.
+func parseExpectedStatus(field string, value *int) (int, error) {
+	if value == nil {
+		return 0, nil
+	}
+	if *value < ExpectedStatusMin || *value > ExpectedStatusMax {
+		return 0, fmt.Errorf("config: %s must be between %d and %d, got %d",
+			field, ExpectedStatusMin, ExpectedStatusMax, *value)
+	}
+	return *value, nil
+}
+
+// parseHeaders copies the configured headers, rejecting empty (or
+// whitespace-only) header names. A nil map stays nil so "no headers" remains
+// distinguishable from an empty set; values are passed through unchanged
+// because an empty header value is legal.
+func parseHeaders(field string, raw map[string]string) (map[string]string, error) {
+	if raw == nil {
+		return nil, nil
+	}
+	headers := make(map[string]string, len(raw))
+	for name, value := range raw {
+		trimmed := strings.TrimSpace(name)
+		if trimmed == "" {
+			return nil, fmt.Errorf("config: %s contains an empty header name", field)
+		}
+		headers[trimmed] = value
+	}
+	return headers, nil
+}
+
+// parseFollowRedirects resolves the optional follow_redirects flag, defaulting
+// to DefaultFollowRedirects when it is omitted.
+func parseFollowRedirects(value *bool) bool {
+	if value == nil {
+		return DefaultFollowRedirects
+	}
+	return *value
 }

@@ -186,7 +186,7 @@ func TestParse(t *testing.T) {
 		},
 		{
 			name:    "unknown target field",
-			input:   `{"targets": [{"name": "a", "url": "https://example.com", "expected_status": 200}]}`,
+			input:   `{"targets": [{"name": "a", "url": "https://example.com", "retries": 3}]}`,
 			wantErr: "unknown field",
 		},
 		{
@@ -306,6 +306,134 @@ func TestParse(t *testing.T) {
 					t.Errorf("URL = %q, want %q", got, "https://example.com")
 				}
 			},
+		},
+		{
+			name:  "rich check fields default when omitted",
+			input: `{"targets": [{"name": "plain", "url": "https://example.com"}]}`,
+			check: func(t *testing.T, cfg *Config) {
+				got := cfg.Targets[0]
+				if got.Method != DefaultMethod {
+					t.Errorf("Method = %q, want the default %q", got.Method, DefaultMethod)
+				}
+				if got.ExpectedStatus != 0 {
+					t.Errorf("ExpectedStatus = %d, want 0 (unset -> 2xx rule)", got.ExpectedStatus)
+				}
+				if got.Headers != nil {
+					t.Errorf("Headers = %v, want nil when omitted", got.Headers)
+				}
+				if !got.FollowRedirects {
+					t.Errorf("FollowRedirects = false, want the default %v", DefaultFollowRedirects)
+				}
+			},
+		},
+		{
+			name: "rich check fields honored",
+			input: `{"targets": [{
+				"name": "rich", "url": "https://example.com",
+				"method": "post",
+				"expected_status": 500,
+				"headers": {"Accept": "application/json", "X-Trace": "abc"},
+				"follow_redirects": false
+			}]}`,
+			check: func(t *testing.T, cfg *Config) {
+				got := cfg.Targets[0]
+				// Lower-case input is normalized, so this also pins the
+				// "lowercase normalizes to uppercase and passes" rule.
+				if got.Method != "POST" {
+					t.Errorf("Method = %q, want %q", got.Method, "POST")
+				}
+				if got.ExpectedStatus != 500 {
+					t.Errorf("ExpectedStatus = %d, want 500", got.ExpectedStatus)
+				}
+				if got.Headers["Accept"] != "application/json" || got.Headers["X-Trace"] != "abc" {
+					t.Errorf("Headers = %v, want the two configured entries", got.Headers)
+				}
+				if got.FollowRedirects {
+					t.Error("FollowRedirects = true, want the explicit false")
+				}
+			},
+		},
+		{
+			name:  "follow_redirects true is honored",
+			input: `{"targets": [{"name": "r", "url": "https://example.com", "follow_redirects": true}]}`,
+			check: func(t *testing.T, cfg *Config) {
+				if !cfg.Targets[0].FollowRedirects {
+					t.Error("FollowRedirects = false, want true")
+				}
+			},
+		},
+		{
+			name:  "whitespace-only method falls back to the default",
+			input: `{"targets": [{"name": "m", "url": "https://example.com", "method": "   "}]}`,
+			check: func(t *testing.T, cfg *Config) {
+				if got := cfg.Targets[0].Method; got != DefaultMethod {
+					t.Errorf("Method = %q, want the default %q", got, DefaultMethod)
+				}
+			},
+		},
+		{
+			name: "expected_status boundaries are accepted",
+			input: `{"targets": [
+				{"name": "lo", "url": "https://example.com", "expected_status": 100},
+				{"name": "hi", "url": "https://example.com", "expected_status": 599}
+			]}`,
+			check: func(t *testing.T, cfg *Config) {
+				if cfg.Targets[0].ExpectedStatus != 100 {
+					t.Errorf("ExpectedStatus = %d, want 100", cfg.Targets[0].ExpectedStatus)
+				}
+				if cfg.Targets[1].ExpectedStatus != 599 {
+					t.Errorf("ExpectedStatus = %d, want 599", cfg.Targets[1].ExpectedStatus)
+				}
+			},
+		},
+		{
+			name:  "header names are trimmed",
+			input: `{"targets": [{"name": "h", "url": "https://example.com", "headers": {"  X-Spaced  ": "v"}}]}`,
+			check: func(t *testing.T, cfg *Config) {
+				if got := cfg.Targets[0].Headers["X-Spaced"]; got != "v" {
+					t.Errorf("Headers = %v, want the trimmed name X-Spaced", cfg.Targets[0].Headers)
+				}
+			},
+		},
+		{
+			name:    "invalid method with space",
+			input:   `{"targets": [{"name": "a", "url": "https://example.com", "method": "GET /"}]}`,
+			wantErr: "targets[0].method",
+		},
+		{
+			name:    "invalid method with hyphen",
+			input:   `{"targets": [{"name": "a", "url": "https://example.com", "method": "M-SEARCH"}]}`,
+			wantErr: "must match ^[A-Z]+$",
+		},
+		{
+			name:    "invalid method with digits",
+			input:   `{"targets": [{"name": "a", "url": "https://example.com", "method": "GET2"}]}`,
+			wantErr: "targets[0].method",
+		},
+		{
+			name:    "explicit zero expected_status",
+			input:   `{"targets": [{"name": "a", "url": "https://example.com", "expected_status": 0}]}`,
+			wantErr: "targets[0].expected_status must be between 100 and 599",
+		},
+		{
+			name:    "expected_status below range",
+			input:   `{"targets": [{"name": "a", "url": "https://example.com", "expected_status": 99}]}`,
+			wantErr: "targets[0].expected_status must be between 100 and 599",
+		},
+		{
+			name:    "expected_status above range",
+			input:   `{"targets": [{"name": "a", "url": "https://example.com", "expected_status": 600}]}`,
+			wantErr: "targets[0].expected_status must be between 100 and 599",
+		},
+		{
+			name:    "empty header name",
+			input:   `{"targets": [{"name": "a", "url": "https://example.com", "headers": {"": "v"}}]}`,
+			wantErr: "targets[0].headers contains an empty header name",
+		},
+		{
+			name:    "whitespace header name",
+			input:   `{"targets": [{"name": "a", "url": "https://example.com", "headers": {"   ": "v"}}]}`,
+			wantErr: "targets[0].headers contains an empty header name",
 		},
 	}
 

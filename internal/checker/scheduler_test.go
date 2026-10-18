@@ -540,6 +540,83 @@ func TestSchedulerSaturatedDispatch(t *testing.T) {
 	}
 }
 
+// TestSchedulerFollowRedirectsSelectsClient proves the scheduler owns redirect
+// policy: two runs against the same redirecting URL, one following redirects
+// and one not, must be classified from the status of the response the client
+// actually returned (200 after following vs the raw 301).
+func TestSchedulerFollowRedirectsSelectsClient(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/start", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/final", http.StatusMovedPermanently)
+	})
+	mux.HandleFunc("/final", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	// run starts a scheduler with a single target on a one-hour cadence, waits
+	// for the immediate first check, then shuts down and returns that result.
+	// The long interval guarantees exactly one recorded result.
+	run := func(t *testing.T, follow bool) Result {
+		t.Helper()
+
+		client := srv.Client()
+		t.Cleanup(client.CloseIdleConnections)
+
+		cfg := config.Config{
+			Defaults: config.DefaultsConfig{Workers: 1, Interval: time.Hour, Timeout: 5 * time.Second},
+			Targets: []config.Target{{
+				Name:            "redirect",
+				URL:             srv.URL + "/start",
+				FollowRedirects: follow,
+				Interval:        time.Hour,
+				Timeout:         5 * time.Second,
+			}},
+		}
+
+		rec := &MemoryRecorder{}
+		s := New(cfg, client, rec, testLogger())
+
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() { done <- s.Run(ctx) }()
+
+		waitForResults(t, rec, 1, 3*time.Second)
+		cancel()
+		if err := <-done; err != nil {
+			t.Fatalf("Run() error = %v, want nil", err)
+		}
+
+		results := rec.Snapshot()
+		if len(results) != 1 {
+			t.Fatalf("recorded %d results, want exactly 1", len(results))
+		}
+		return results[0]
+	}
+
+	t.Run("follow_redirects true reaches the final 200", func(t *testing.T) {
+		res := run(t, true)
+		if res.Outcome != OutcomeUp {
+			t.Errorf("Outcome = %q (err=%q), want %q", res.Outcome, res.Err, OutcomeUp)
+		}
+		if res.StatusCode != http.StatusOK {
+			t.Errorf("StatusCode = %d, want %d after following the redirect", res.StatusCode, http.StatusOK)
+		}
+	})
+
+	t.Run("follow_redirects false records the raw 301 as down", func(t *testing.T) {
+		res := run(t, false)
+		if res.Outcome != OutcomeDown {
+			t.Errorf("Outcome = %q (err=%q), want %q", res.Outcome, res.Err, OutcomeDown)
+		}
+		if res.StatusCode != http.StatusMovedPermanently {
+			t.Errorf("StatusCode = %d, want the raw %d", res.StatusCode, http.StatusMovedPermanently)
+		}
+	})
+}
+
 func summarize(results []Result) string {
 	var b strings.Builder
 	for i, r := range results {

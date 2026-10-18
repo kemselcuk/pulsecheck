@@ -29,15 +29,24 @@ const busyTimeoutMs = 5000
 const maxOpenConns = 4
 
 // schemaStatements are idempotent, so reopening an existing database is safe.
+//
+// Migration story (v1.1): the results table is created with every current
+// column, so a NEW database is born complete. A database created by an older
+// release already has the table, so CREATE TABLE IF NOT EXISTS is a no-op and
+// the missing column is added by an explicit, idempotent ALTER TABLE in
+// migrate(). Schema evolution is therefore additive and detected from the live
+// schema (PRAGMA table_info) rather than tracked with a version table, which
+// keeps reopening an old database on every start safe and loss-free.
 var schemaStatements = []string{
 	`CREATE TABLE IF NOT EXISTS results (
-		id          INTEGER PRIMARY KEY AUTOINCREMENT,
-		target      TEXT    NOT NULL,
-		started_at  INTEGER NOT NULL,
-		outcome     TEXT    NOT NULL CHECK (outcome IN ('up', 'down', 'timeout', 'error', 'skipped')),
-		status_code INTEGER,
-		duration_ms INTEGER,
-		error       TEXT
+		id              INTEGER PRIMARY KEY AUTOINCREMENT,
+		target          TEXT    NOT NULL,
+		started_at      INTEGER NOT NULL,
+		outcome         TEXT    NOT NULL CHECK (outcome IN ('up', 'down', 'timeout', 'error', 'skipped')),
+		status_code     INTEGER,
+		duration_ms     INTEGER,
+		error           TEXT,
+		cert_expires_at INTEGER
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_results_target_time ON results (target, started_at)`,
 }
@@ -105,6 +114,10 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+	if err := s.migrate(); err != nil {
+		db.Close()
+		return nil, err
+	}
 	return s, nil
 }
 
@@ -116,6 +129,58 @@ func (s *Store) createSchema() error {
 		}
 	}
 	return nil
+}
+
+// migrate brings a database created by an older release up to the current
+// schema. It is intentionally additive and idempotent: each step is skipped
+// when the live schema already satisfies it, so Open can run it on every start
+// — including on a brand-new database, where createSchema already added the
+// column — without side effects.
+func (s *Store) migrate() error {
+	hasCert, err := s.hasColumn("results", "cert_expires_at")
+	if err != nil {
+		return err
+	}
+	if !hasCert {
+		// Older databases lack the column; add it. Existing rows get NULL,
+		// which scanResult reads back as the zero time (no certificate info).
+		if _, err := s.db.Exec(`ALTER TABLE results ADD COLUMN cert_expires_at INTEGER`); err != nil {
+			return fmt.Errorf("store: migrate results: add cert_expires_at: %w", err)
+		}
+	}
+	return nil
+}
+
+// hasColumn reports whether table has a column named column, as read from the
+// live schema. table and column are internal constants, never user input, so
+// interpolating the table name into the pragma carries no injection risk.
+func (s *Store) hasColumn(table, column string) (bool, error) {
+	rows, err := s.db.Query(fmt.Sprintf(`PRAGMA table_info(%s)`, table))
+	if err != nil {
+		return false, fmt.Errorf("store: inspect %s schema: %w", table, err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			cid        int
+			name       string
+			colType    string
+			notNull    int
+			defaultV   sql.NullString
+			primaryKey int
+		)
+		if err := rows.Scan(&cid, &name, &colType, &notNull, &defaultV, &primaryKey); err != nil {
+			return false, fmt.Errorf("store: scan %s schema: %w", table, err)
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, fmt.Errorf("store: inspect %s schema: %w", table, err)
+	}
+	return false, nil
 }
 
 // Record persists r, implementing checker.Recorder.
@@ -133,20 +198,28 @@ func (s *Store) Record(r checker.Result) {
 //
 // r.StartedAt is stored exactly as given (as Unix milliseconds), never replaced
 // with the current time, so callers and tests control the recorded timestamp.
-// r.URL is not part of the current schema and is not persisted.
+// r.URL is not part of the current schema and is not persisted. A zero
+// r.CertExpiresAt is stored as SQL NULL; otherwise the instant is stored as Unix
+// milliseconds.
 func (s *Store) RecordResult(r checker.Result) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	var certExpiresAt any // NULL when there is no certificate info
+	if !r.CertExpiresAt.IsZero() {
+		certExpiresAt = r.CertExpiresAt.UnixMilli()
+	}
+
 	_, err := s.db.Exec(
-		`INSERT INTO results (target, started_at, outcome, status_code, duration_ms, error)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO results (target, started_at, outcome, status_code, duration_ms, error, cert_expires_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		r.TargetName,
 		r.StartedAt.UnixMilli(),
 		string(r.Outcome),
 		r.StatusCode,
 		r.Duration.Milliseconds(),
 		r.Err,
+		certExpiresAt,
 	)
 	if err != nil {
 		return fmt.Errorf("store: record result for %q: %w", r.TargetName, err)
@@ -158,7 +231,7 @@ func (s *Store) RecordResult(r checker.Result) error {
 // no result exists yet.
 func (s *Store) Latest(target string) (checker.Result, bool, error) {
 	row := s.db.QueryRow(
-		`SELECT target, started_at, duration_ms, outcome, status_code, error
+		`SELECT target, started_at, duration_ms, outcome, status_code, error, cert_expires_at
 		 FROM results
 		 WHERE target = ?
 		 ORDER BY started_at DESC, id DESC
@@ -184,7 +257,7 @@ func (s *Store) History(target string, limit int) ([]checker.Result, error) {
 	}
 
 	rows, err := s.db.Query(
-		`SELECT target, started_at, duration_ms, outcome, status_code, error
+		`SELECT target, started_at, duration_ms, outcome, status_code, error, cert_expires_at
 		 FROM results
 		 WHERE target = ?
 		 ORDER BY started_at DESC, id DESC
@@ -257,25 +330,33 @@ func (s *Store) Close() error {
 	return nil
 }
 
-// scanResult reads the common result column list into a checker.Result.
+// scanResult reads the common result column list into a checker.Result. The
+// column order must match the SELECT lists in Latest and History:
+// target, started_at, duration_ms, outcome, status_code, error, cert_expires_at.
 func scanResult(row interface{ Scan(dest ...any) error }) (checker.Result, error) {
 	var (
-		target     string
-		startedAt  int64
-		durationMs sql.NullInt64
-		outcome    string
-		statusCode sql.NullInt64
-		errMsg     sql.NullString
+		target        string
+		startedAt     int64
+		durationMs    sql.NullInt64
+		outcome       string
+		statusCode    sql.NullInt64
+		errMsg        sql.NullString
+		certExpiresAt sql.NullInt64
 	)
-	if err := row.Scan(&target, &startedAt, &durationMs, &outcome, &statusCode, &errMsg); err != nil {
+	if err := row.Scan(&target, &startedAt, &durationMs, &outcome, &statusCode, &errMsg, &certExpiresAt); err != nil {
 		return checker.Result{}, err
 	}
+	var cert time.Time
+	if certExpiresAt.Valid {
+		cert = time.UnixMilli(certExpiresAt.Int64).UTC()
+	}
 	return checker.Result{
-		TargetName: target,
-		StartedAt:  time.UnixMilli(startedAt).UTC(),
-		Duration:   time.Duration(durationMs.Int64) * time.Millisecond,
-		Outcome:    checker.Outcome(outcome),
-		StatusCode: int(statusCode.Int64),
-		Err:        errMsg.String,
+		TargetName:    target,
+		StartedAt:     time.UnixMilli(startedAt).UTC(),
+		Duration:      time.Duration(durationMs.Int64) * time.Millisecond,
+		Outcome:       checker.Outcome(outcome),
+		StatusCode:    int(statusCode.Int64),
+		Err:           errMsg.String,
+		CertExpiresAt: cert,
 	}, nil
 }

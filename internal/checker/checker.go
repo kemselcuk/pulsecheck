@@ -14,7 +14,9 @@ import (
 type Outcome string
 
 const (
-	// OutcomeUp means the final HTTP status (after redirects) was 2xx.
+	// OutcomeUp means the final HTTP status (after redirects) was accepted: it
+	// equalled the target's expected_status when one was configured, or fell in
+	// the 2xx range otherwise.
 	OutcomeUp Outcome = "up"
 	// OutcomeDown means a response was received with a non-2xx status.
 	OutcomeDown Outcome = "down"
@@ -38,9 +40,22 @@ type Result struct {
 	Outcome    Outcome
 	StatusCode int
 	Err        string
+	// CertExpiresAt is the NotAfter instant of the leaf certificate of the
+	// final TLS connection, or the zero time when the check did not complete a
+	// TLS handshake (plain HTTP, a transport error, or a timeout).
+	CertExpiresAt time.Time
 }
 
-// Check performs a single GET against t and classifies the outcome.
+// Check performs a single request against t and classifies the outcome.
+//
+// The request uses t.Method (defaulting to GET when empty, so programmatically
+// built targets behave like parsed ones) and carries every entry of t.Headers.
+//
+// Classification follows the target's richer definition: when
+// t.ExpectedStatus > 0 the check is up if and only if the final response status
+// equals it, otherwise the up status is down; when t.ExpectedStatus is zero the
+// 2xx rule applies (any 2xx is up, anything else is down). Both rules judge the
+// FINAL response after any redirects the client followed.
 //
 // The caller owns the deadline: ctx is passed to the request unchanged, so the
 // scheduler can wrap it in a per-request context.WithTimeout while tests can
@@ -48,6 +63,11 @@ type Result struct {
 // single timeout mechanism (the request context) keeps one source of truth,
 // makes the behaviour testable with a plain context, and avoids confusing
 // double-deadline interactions.
+//
+// Redirect policy is owned by the caller, not by Check: whether redirects are
+// followed is a property of the supplied *http.Client (the scheduler picks the
+// matching client for t.FollowRedirects). Check therefore needs no knowledge of
+// t.FollowRedirects.
 //
 // Check never panics; unrecognised situations fall back to OutcomeError.
 func Check(ctx context.Context, t config.Target, client *http.Client) (res Result) {
@@ -63,11 +83,19 @@ func Check(ctx context.Context, t config.Target, client *http.Client) (res Resul
 		client = http.DefaultClient
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, t.URL, nil)
+	method := t.Method
+	if method == "" {
+		method = http.MethodGet
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, t.URL, nil)
 	if err != nil {
 		res.Outcome = OutcomeError
 		res.Err = err.Error()
 		return res
+	}
+	for name, value := range t.Headers {
+		req.Header.Set(name, value)
 	}
 
 	resp, err := client.Do(req)
@@ -94,10 +122,25 @@ func Check(ctx context.Context, t config.Target, client *http.Client) (res Resul
 	io.CopyN(io.Discard, resp.Body, 512)
 
 	res.StatusCode = resp.StatusCode
-	if resp.StatusCode >= 200 && resp.StatusCode <= 299 {
+	switch {
+	case t.ExpectedStatus > 0:
+		if resp.StatusCode == t.ExpectedStatus {
+			res.Outcome = OutcomeUp
+		} else {
+			res.Outcome = OutcomeDown
+		}
+	case resp.StatusCode >= 200 && resp.StatusCode <= 299:
 		res.Outcome = OutcomeUp
-	} else {
+	default:
 		res.Outcome = OutcomeDown
+	}
+
+	// resp.TLS belongs to the FINAL response, i.e. the connection that produced
+	// StatusCode after any redirects were followed; PeerCertificates[0] is that
+	// connection's leaf certificate. A plain HTTP response has resp.TLS == nil,
+	// leaving CertExpiresAt at its zero value.
+	if resp.TLS != nil && len(resp.TLS.PeerCertificates) > 0 {
+		res.CertExpiresAt = resp.TLS.PeerCertificates[0].NotAfter
 	}
 	return res
 }

@@ -174,6 +174,222 @@ func TestCheckNilClientTolerated(t *testing.T) {
 	}
 }
 
+// TestCheckRichRequest proves the configured method and headers reach the
+// server, and that a matching expected_status is classified as up.
+func TestCheckRichRequest(t *testing.T) {
+	type observed struct {
+		method  string
+		headers http.Header
+	}
+	seen := make(chan observed, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen <- observed{method: r.Method, headers: r.Header.Clone()}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	client := srv.Client()
+	t.Cleanup(client.CloseIdleConnections)
+
+	target := config.Target{
+		Name:           "rich",
+		URL:            srv.URL,
+		Method:         "POST",
+		Headers:        map[string]string{"Accept": "application/json", "X-Trace": "abc"},
+		ExpectedStatus: http.StatusOK,
+	}
+	res := Check(context.Background(), target, client)
+	if res.Outcome != OutcomeUp {
+		t.Errorf("Outcome = %q (err=%q), want %q", res.Outcome, res.Err, OutcomeUp)
+	}
+	if res.StatusCode != http.StatusOK {
+		t.Errorf("StatusCode = %d, want %d", res.StatusCode, http.StatusOK)
+	}
+
+	select {
+	case got := <-seen:
+		if got.method != "POST" {
+			t.Errorf("server saw method %q, want %q", got.method, "POST")
+		}
+		if v := got.headers.Get("Accept"); v != "application/json" {
+			t.Errorf("server saw Accept %q, want %q", v, "application/json")
+		}
+		if v := got.headers.Get("X-Trace"); v != "abc" {
+			t.Errorf("server saw X-Trace %q, want %q", v, "abc")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("server never received the request")
+	}
+}
+
+// TestCheckEmptyMethodDefaultsToGet pins the fail-safe for targets built in
+// code without config defaults: an empty Method still sends a GET.
+func TestCheckEmptyMethodDefaultsToGet(t *testing.T) {
+	seen := make(chan string, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen <- r.Method
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	client := srv.Client()
+	t.Cleanup(client.CloseIdleConnections)
+
+	res := Check(context.Background(), config.Target{Name: "empty", URL: srv.URL}, client)
+	if res.Outcome != OutcomeUp {
+		t.Fatalf("Outcome = %q (err=%q), want %q", res.Outcome, res.Err, OutcomeUp)
+	}
+	select {
+	case got := <-seen:
+		if got != http.MethodGet {
+			t.Errorf("server saw method %q, want %q", got, http.MethodGet)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("server never received the request")
+	}
+}
+
+// TestCheckExpectedStatus covers the richer classification rule: a configured
+// expected_status of 500 makes a 500 response up, while leaving it unset keeps
+// the 2xx rule and classifies the same response as down.
+func TestCheckExpectedStatus(t *testing.T) {
+	srv := httptest.NewServer(statusHandler(http.StatusInternalServerError))
+	t.Cleanup(srv.Close)
+
+	client := srv.Client()
+	t.Cleanup(client.CloseIdleConnections)
+
+	t.Run("configured 500 with a 500 response is up", func(t *testing.T) {
+		res := Check(context.Background(), config.Target{
+			Name: "expected", URL: srv.URL, ExpectedStatus: http.StatusInternalServerError,
+		}, client)
+		if res.Outcome != OutcomeUp {
+			t.Errorf("Outcome = %q (err=%q), want %q", res.Outcome, res.Err, OutcomeUp)
+		}
+		if res.StatusCode != http.StatusInternalServerError {
+			t.Errorf("StatusCode = %d, want %d", res.StatusCode, http.StatusInternalServerError)
+		}
+	})
+
+	t.Run("unset with a 500 response is down", func(t *testing.T) {
+		res := Check(context.Background(), config.Target{Name: "unset", URL: srv.URL}, client)
+		if res.Outcome != OutcomeDown {
+			t.Errorf("Outcome = %q (err=%q), want %q", res.Outcome, res.Err, OutcomeDown)
+		}
+		if res.StatusCode != http.StatusInternalServerError {
+			t.Errorf("StatusCode = %d, want %d", res.StatusCode, http.StatusInternalServerError)
+		}
+	})
+
+	t.Run("configured 200 with a 500 response is down", func(t *testing.T) {
+		res := Check(context.Background(), config.Target{
+			Name: "wrong", URL: srv.URL, ExpectedStatus: http.StatusOK,
+		}, client)
+		if res.Outcome != OutcomeDown {
+			t.Errorf("Outcome = %q (err=%q), want %q", res.Outcome, res.Err, OutcomeDown)
+		}
+	})
+}
+
+// TestCheckExpectedStatusWithRedirects pins the combined case the review noted
+// as piecewise-covered only: expected_status is judged on the FINAL response
+// of the chain, and with redirects disabled it is judged on the raw redirect
+// response itself.
+func TestCheckExpectedStatusWithRedirects(t *testing.T) {
+	final := httptest.NewServer(okHandler())
+	t.Cleanup(final.Close)
+
+	redirect := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, final.URL+"/landing", http.StatusMovedPermanently)
+	}))
+	t.Cleanup(redirect.Close)
+
+	client := redirect.Client()
+	t.Cleanup(client.CloseIdleConnections)
+
+	// The followRedirects decision lives in the scheduler's client choice, so
+	// the "not following" case below passes the same twin the scheduler would
+	// (withoutRedirects) rather than expecting Check to know about the field.
+	noRedirect := withoutRedirects(client)
+
+	// Following: the chain ends in a 200, so expected_status=200 is up.
+	follow := config.Target{
+		Name: "chain", URL: redirect.URL, ExpectedStatus: http.StatusOK, FollowRedirects: true,
+	}
+	if res := Check(context.Background(), follow, client); res.Outcome != OutcomeUp {
+		t.Errorf("followed chain with expected 200: Outcome = %q (status %d), want %q", res.Outcome, res.StatusCode, OutcomeUp)
+	}
+
+	// Following but expecting the redirect code: the final 200 mismatches -> down.
+	wrong := config.Target{
+		Name: "chain-wrong", URL: redirect.URL, ExpectedStatus: http.StatusMovedPermanently, FollowRedirects: true,
+	}
+	if res := Check(context.Background(), wrong, client); res.Outcome != OutcomeDown {
+		t.Errorf("followed chain expecting 301: Outcome = %q (status %d), want %q", res.Outcome, res.StatusCode, OutcomeDown)
+	}
+
+	// NOT following: the raw 301 is the final response, so expected_status=301 is up
+	// and the landing page was never requested (the twin returns the first response).
+	noFollow := config.Target{
+		Name: "raw", URL: redirect.URL, ExpectedStatus: http.StatusMovedPermanently,
+	}
+	if res := Check(context.Background(), noFollow, noRedirect); res.Outcome != OutcomeUp || res.StatusCode != http.StatusMovedPermanently {
+		t.Errorf("raw 301 expecting 301: Outcome = %q (status %d), want up/301", res.Outcome, res.StatusCode)
+	}
+}
+
+// TestCheckTLSCertificate proves certificate tracking: a TLS response records
+// the leaf certificate's expiry, while a plain HTTP response records nothing.
+// Status and duration behave exactly as before in both cases.
+func TestCheckTLSCertificate(t *testing.T) {
+	t.Run("https records a future expiry", func(t *testing.T) {
+		srv := httptest.NewTLSServer(okHandler())
+		t.Cleanup(srv.Close)
+
+		client := srv.Client()
+		t.Cleanup(client.CloseIdleConnections)
+
+		res := Check(context.Background(), config.Target{Name: "tls", URL: srv.URL}, client)
+		if res.Outcome != OutcomeUp {
+			t.Fatalf("Outcome = %q (err=%q), want %q", res.Outcome, res.Err, OutcomeUp)
+		}
+		if res.StatusCode != http.StatusOK {
+			t.Errorf("StatusCode = %d, want %d", res.StatusCode, http.StatusOK)
+		}
+		if res.Duration <= 0 {
+			t.Errorf("Duration = %v, want > 0", res.Duration)
+		}
+		if res.CertExpiresAt.IsZero() {
+			t.Fatal("CertExpiresAt is zero, want the TLS leaf certificate expiry")
+		}
+		if !res.CertExpiresAt.After(time.Now()) {
+			t.Errorf("CertExpiresAt = %v, want a time in the future", res.CertExpiresAt)
+		}
+	})
+
+	t.Run("plain http records no expiry", func(t *testing.T) {
+		srv := httptest.NewServer(okHandler())
+		t.Cleanup(srv.Close)
+
+		client := srv.Client()
+		t.Cleanup(client.CloseIdleConnections)
+
+		res := Check(context.Background(), config.Target{Name: "plain", URL: srv.URL}, client)
+		if res.Outcome != OutcomeUp {
+			t.Fatalf("Outcome = %q (err=%q), want %q", res.Outcome, res.Err, OutcomeUp)
+		}
+		if res.StatusCode != http.StatusOK {
+			t.Errorf("StatusCode = %d, want %d", res.StatusCode, http.StatusOK)
+		}
+		if res.Duration <= 0 {
+			t.Errorf("Duration = %v, want > 0", res.Duration)
+		}
+		if !res.CertExpiresAt.IsZero() {
+			t.Errorf("CertExpiresAt = %v, want the zero time for plain HTTP", res.CertExpiresAt)
+		}
+	})
+}
+
 func okHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)

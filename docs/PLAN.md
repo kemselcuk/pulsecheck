@@ -159,7 +159,7 @@ All acceptance criteria above checked + the demo video embedded in the README + 
 
 ## v1.1 Phase 1 — Richer checks (schema first; the base for the rest)
 
-> **Status:** ☐ Pending
+> **Status:** ✅ Complete (2026-10-18) — implementer: `deepseek-v4.1-flash`; reviewer: `glm-5.3-flash` (APPROVE; header-injection and method-token defense verified EMPIRICALLY with live probes; 1 minor → deferred consciously as D30c). Orchestrator: added the combined expected_status+redirect pin test (the review's nit), full suite green.
 
 | Task | Content | Acceptance criteria |
 |---|---|---|
