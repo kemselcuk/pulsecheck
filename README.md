@@ -116,6 +116,8 @@ A richer definition (all four fields are demonstrated in `config.example.json`):
   "targets": [
     { "name": "httpbin-204", "url": "https://httpbin.org/status/204",
       "expected_status": 204, "interval": "60s" },
+    { "name": "httpbin-post", "url": "https://httpbin.org/post",
+      "method": "POST", "expected_status": 200, "interval": "120s" },
     { "name": "httpbin-legacy-redirect", "url": "https://httpbin.org/redirect-to?url=/status/200&status_code=301",
       "follow_redirects": false, "expected_status": 301 }
   ]
@@ -148,7 +150,7 @@ Read-only endpoints; use only `net/http` (Go 1.22 pattern routing) and write not
 | `GET /` | The dashboard: the embedded single-page status screen; polls `/api/status` every 5 seconds and links every card to its detail page |
 | `GET /targets/{name}` | Per-target detail page (server-rendered HTML): uptime figures, certificate expiry, duration sparkline; unknown name → 404 |
 
-Examples from a real local run:
+Examples from a real local run (the bundled demo config plus one ad-hoc `demo-tls` target pointing at `https://example.com` so the certificate surfaces are exercised):
 
 ```console
 $ curl -s http://localhost:8080/api/status
@@ -288,7 +290,7 @@ $ go test -fuzz=FuzzParse -fuzztime 60s ./internal/config/    # native fuzzing
 $ go test -bench . -benchtime 200x -run '^$' ./internal/checker/ ./internal/store/ -benchmem
 ```
 
-CI ([`ci.yml`](.github/workflows/ci.yml)) runs four gates on every push to `main` and every pull request: `go vet` + `go test -race`, a 30 s fuzz step, a benchmark evidence step, and a separate `lint` job (golangci-lint pinned to v2.15.0, uncapped reporting, zero complaints). The [`release.yml`](.github/workflows/release.yml) pipeline re-runs the race suite as a guard before publishing any tag.
+CI ([`ci.yml`](.github/workflows/ci.yml)) runs four gates on every push to `main` (and to `faz-*` phase branches) and every pull request: `go vet` + `go test -race`, a 30 s fuzz step, a benchmark evidence step, and a separate `lint` job (golangci-lint pinned to v2.15.0, uncapped reporting, zero complaints). The [`release.yml`](.github/workflows/release.yml) pipeline re-runs the race suite as a guard before publishing any tag.
 
 Which test proves which promise:
 

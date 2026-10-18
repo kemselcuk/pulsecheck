@@ -6,6 +6,8 @@
       "headers": { "Accept": "text/html", "User-Agent": "pulsecheck-example/1.0" } },
     { "name": "httpbin-204", "url": "https://httpbin.org/status/204",
       "expected_status": 204, "interval": "60s" },
+    { "name": "httpbin-post", "url": "https://httpbin.org/post",
+      "method": "POST", "expected_status": 200, "interval": "120s" },
     { "name": "httpbin-legacy-redirect", "url": "https://httpbin.org/redirect-to?url=/status/200&status_code=301",
       "follow_redirects": false, "expected_status": 301 }
   ]
