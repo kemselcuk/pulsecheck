@@ -56,6 +56,8 @@
 
 ### Faz 0 — İskelet ve kanal
 
+> **Durum:** ✅ Tamamlandı (2026-10-18) — commit'ler `b5bf8c1`, `60fc004`, `1db5081`. Implementer: `deepseek-v4.1-flash`; reviewer: `glm-5.3-flash` (APPROVE); orkestratör doğrulaması: build/vet/test -race ve smoke test yeniden koşuldu, exit 0.
+
 | Görev | İçerik | Kabul ölçütleri |
 |---|---|---|
 | **T0.1 Karar günlüğü** | `docs/decisions.md` başlangıç içeriği: K1–K11 + T1–T5 kayıtları | Her kayıtta bağlam/karar/gerekçe alanı var; kullanıcı seçimleriyle birebir uyumlu |
