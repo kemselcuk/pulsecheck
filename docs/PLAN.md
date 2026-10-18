@@ -169,7 +169,7 @@ All acceptance criteria above checked + the demo video embedded in the README + 
 
 ## v1.1 Phase 2 — Observability
 
-> **Status:** ☐ Pending
+> **Status:** ✅ Complete (2026-10-18) — implementer: `deepseek-v4.1-flash` (their own live smoke caught + fixed a /healthz mount bug, pinned by main_test.go); reviewer: `glm-5.3-flash` (APPROVE; EXPLAIN QUERY PLAN index proof, empirical escaping/XSS probes, byte-stability; findings minor/nit only — no code change requested). Orchestrator: live smoke reproduced; D31 recorded.
 
 | Task | Content | Acceptance criteria |
 |---|---|---|

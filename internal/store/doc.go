@@ -9,4 +9,9 @@
 // every current column, while a database created by an older release has any
 // missing columns added by an idempotent, guarded ALTER TABLE, so reopening an
 // old database never loses data.
+//
+// Besides the per-target statistics, the store answers the observability
+// questions the API and the metrics endpoint need: uptime over a window (with
+// skipped rounds excluded from the denominator), the per-outcome counts in a
+// window, and the time of the newest recorded check.
 package store

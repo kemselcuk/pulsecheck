@@ -1,8 +1,8 @@
 // Command pulsecheck is the main entry point of the PulseCheck service.
 //
-// It wires the five internal packages — config, checker, store, api, web —
-// together and owns the process lifecycle. A single signal-aware context is
-// the backbone: SIGINT/SIGTERM cancels it, the checker stops because that
+// It wires the six internal packages — config, checker, store, api, metrics,
+// web — together and owns the process lifecycle. A single signal-aware context
+// is the backbone: SIGINT/SIGTERM cancels it, the checker stops because that
 // context IS its context, and the HTTP server drains before the store closes.
 package main
 
@@ -20,9 +20,15 @@ import (
 	"pulsecheck/internal/api"
 	"pulsecheck/internal/checker"
 	"pulsecheck/internal/config"
+	"pulsecheck/internal/metrics"
 	"pulsecheck/internal/store"
 	"pulsecheck/internal/web"
 )
+
+// version is the build version reported by /healthz, /metrics, and the startup
+// log. It is a package-level var (not a const) so a release build can override
+// it with -ldflags "-X main.version=<version>".
+var version = "dev"
 
 const (
 	// readHeaderTimeout bounds how long a client may take to send its request
@@ -46,6 +52,27 @@ const (
 
 func main() {
 	os.Exit(run())
+}
+
+// newHandler builds the top-level route table.
+//
+// api.New and metrics.New register FULL patterns ("GET /api/status",
+// "GET /metrics"), so mounting them needs no StripPrefix: each inner mux still
+// sees the full path and matches it exactly as written. The api handler is
+// mounted twice on purpose — under "/api/" for the JSON API and at "/healthz"
+// for the liveness probe, which is a top-level path rather than an /api/ one.
+// Both mounts share one handler, hence one process-start instant for the
+// reported uptime. web.New serves the dashboard at "/" and the target detail
+// pages under "/targets/".
+func newHandler(cfg *config.Config, st *store.Store, version string, logger *slog.Logger) http.Handler {
+	apiHandler := api.New(*cfg, st, version, logger)
+
+	mux := http.NewServeMux()
+	mux.Handle("/api/", apiHandler)
+	mux.Handle("/healthz", apiHandler)
+	mux.Handle("/metrics", metrics.New(*cfg, st, version, logger))
+	mux.Handle("/", web.New(*cfg, st))
+	return mux
 }
 
 // run wires every component, serves until SIGINT/SIGTERM, and returns the
@@ -112,13 +139,9 @@ func run() int {
 	schedDone := make(chan error, 1)
 	go func() { schedDone <- sched.Run(ctx) }()
 
-	// 7. HTTP handler. api.New registers FULL patterns ("GET /api/status"), so
-	// mounting it on the "/api/" subtree needs NO StripPrefix: the inner mux
-	// still sees the full path and matches it exactly as written. web.New
-	// serves the single page at "/".
-	mux := http.NewServeMux()
-	mux.Handle("/api/", api.New(*cfg, st, logger))
-	mux.Handle("/", web.New())
+	// 7. HTTP handler, built by newHandler so the route table can be tested
+	// without binding a port.
+	mux := newHandler(cfg, st, version, logger)
 
 	// 8. HTTP server. ListenAndServe runs in a goroutine and reports over a
 	// buffered channel, so it can never block — even after this function has
@@ -138,6 +161,7 @@ func run() int {
 	}()
 
 	logger.Info("pulsecheck started",
+		"version", version,
 		"addr", cfg.Server.Addr,
 		"targets", len(cfg.Targets),
 		"workers", cfg.Defaults.Workers,

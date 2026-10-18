@@ -17,6 +17,9 @@ import (
 
 // --- helpers -----------------------------------------------------------------
 
+// testVersion is the build version every test server reports.
+const testVersion = "test-version"
+
 // testLogger discards output so a failing store path does not spam the test log.
 func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -40,7 +43,7 @@ func newStore(t *testing.T) *store.Store {
 func newServer(t *testing.T, cfg config.Config, st *store.Store) string {
 	t.Helper()
 
-	srv := httptest.NewServer(New(cfg, st, testLogger()))
+	srv := httptest.NewServer(New(cfg, st, testVersion, testLogger()))
 	t.Cleanup(srv.Close)
 	return srv.URL
 }
@@ -90,11 +93,13 @@ func getJSON(t *testing.T, url string, out any) (int, []byte) {
 type jsonStatus struct {
 	CheckedAt string `json:"checked_at"`
 	Targets   []struct {
-		Name   string      `json:"name"`
-		URL    string      `json:"url"`
-		Last   *jsonResult `json:"last"`
-		Recent []string    `json:"recent"`
-		Stats  jsonStats   `json:"stats"`
+		Name      string      `json:"name"`
+		URL       string      `json:"url"`
+		Last      *jsonResult `json:"last"`
+		Recent    []string    `json:"recent"`
+		Stats     jsonStats   `json:"stats"`
+		Uptime24h *float64    `json:"uptime_24h"`
+		Uptime7d  *float64    `json:"uptime_7d"`
 	} `json:"targets"`
 }
 
@@ -117,6 +122,14 @@ type jsonStats struct {
 
 type errorPayload struct {
 	Error string `json:"error"`
+}
+
+// jsonHealth mirrors the /healthz payload.
+type jsonHealth struct {
+	OK                  bool     `json:"ok"`
+	Version             string   `json:"version"`
+	UptimeSeconds       float64  `json:"uptime_seconds"`
+	LastWriteAgeSeconds *float64 `json:"last_write_age_seconds"`
 }
 
 // --- tests -------------------------------------------------------------------
@@ -221,6 +234,22 @@ func TestStatusShape(t *testing.T) {
 		t.Errorf("alpha.stats = %+v, want %+v", alpha.Stats, wantStats)
 	}
 
+	// alpha: uptime. Completed checks are 2 up + 1 down + 1 timeout = 4, and the
+	// skipped row is excluded, so 2/4 = 50.0% in both windows (every row is
+	// inside 24h, hence also inside 7d).
+	for _, tc := range []struct {
+		name string
+		got  *float64
+	}{{"uptime_24h", alpha.Uptime24h}, {"uptime_7d", alpha.Uptime7d}} {
+		if tc.got == nil {
+			t.Errorf("alpha.%s = null, want 50", tc.name)
+			continue
+		}
+		if *tc.got != 50.0 {
+			t.Errorf("alpha.%s = %v, want 50", tc.name, *tc.got)
+		}
+	}
+
 	// bravo: recent capped at 30 even though 40 rows exist; stats count all 40.
 	bravo := got.Targets[1]
 	if len(bravo.Recent) != 30 {
@@ -237,6 +266,18 @@ func TestStatusShape(t *testing.T) {
 	}
 	if bravo.Last == nil || bravo.Last.Outcome != "up" {
 		t.Errorf("bravo.last = %+v, want the newest up result", bravo.Last)
+	}
+	// bravo is 40/40 up -> 100.0% in both windows.
+	if bravo.Uptime24h == nil || *bravo.Uptime24h != 100.0 {
+		t.Errorf("bravo.uptime_24h = %v, want 100", bravo.Uptime24h)
+	}
+	if bravo.Uptime7d == nil || *bravo.Uptime7d != 100.0 {
+		t.Errorf("bravo.uptime_7d = %v, want 100", bravo.Uptime7d)
+	}
+
+	// charlie has no rows, so both uptime figures are null.
+	if got.Targets[2].Uptime24h != nil || got.Targets[2].Uptime7d != nil {
+		t.Errorf("charlie uptime = (%v, %v), want (null, null)", got.Targets[2].Uptime24h, got.Targets[2].Uptime7d)
 	}
 }
 
@@ -268,9 +309,15 @@ func TestStatusEmptyTarget(t *testing.T) {
 	if ts.Stats != (jsonStats{}) {
 		t.Errorf("stats = %+v, want zeros", ts.Stats)
 	}
-	// The raw JSON must say "recent":[] and "last":null, not the Go zero values.
+	// The raw JSON must say "recent":[] and "last":null, not the Go zero values,
+	// and both uptime figures must be null rather than 0.
 	if !strings.Contains(string(body), `"recent":[]`) || !strings.Contains(string(body), `"last":null`) {
 		t.Errorf("body = %s, want \"recent\":[] and \"last\":null", body)
+	}
+	for _, field := range []string{`"uptime_24h":null`, `"uptime_7d":null`} {
+		if !strings.Contains(string(body), field) {
+			t.Errorf("body = %s, want %s", body, field)
+		}
 	}
 }
 
@@ -369,7 +416,7 @@ func TestMethodNotAllowed(t *testing.T) {
 	cfg := config.Config{Targets: []config.Target{target("alpha", "https://alpha.example/health")}}
 	base := newServer(t, cfg, st)
 
-	for _, path := range []string{"/api/status", "/api/history/alpha"} {
+	for _, path := range []string{"/api/status", "/api/history/alpha", "/healthz"} {
 		resp, err := http.Post(base+path, "application/json", nil)
 		if err != nil {
 			t.Fatalf("POST %s: %v", path, err)
@@ -420,7 +467,7 @@ func TestStoreErrorPath(t *testing.T) {
 
 	base := newServer(t, cfg, st)
 
-	for _, path := range []string{"/api/status", "/api/history/alpha"} {
+	for _, path := range []string{"/api/status", "/api/history/alpha", "/healthz"} {
 		var errBody errorPayload
 		status, body := getJSON(t, base+path, &errBody)
 		if status != http.StatusInternalServerError {
@@ -450,6 +497,11 @@ func TestNilStore(t *testing.T) {
 	if status != http.StatusInternalServerError || errBody.Error != "internal error" {
 		t.Errorf("/api/history/alpha = (%d, %q), want (500, \"internal error\")", status, errBody.Error)
 	}
+
+	status, _ = getJSON(t, base+"/healthz", &errBody)
+	if status != http.StatusInternalServerError || errBody.Error != "internal error" {
+		t.Errorf("/healthz = (%d, %q), want (500, \"internal error\")", status, errBody.Error)
+	}
 }
 
 // TestNilLogger covers the nil-logger fallback in New.
@@ -457,7 +509,7 @@ func TestNilLogger(t *testing.T) {
 	st := newStore(t)
 	cfg := config.Config{Targets: []config.Target{target("alpha", "https://alpha.example/health")}}
 
-	srv := httptest.NewServer(New(cfg, st, nil))
+	srv := httptest.NewServer(New(cfg, st, testVersion, nil))
 	defer srv.Close()
 
 	resp, err := http.Get(srv.URL + "/api/status")
@@ -467,5 +519,79 @@ func TestNilLogger(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("status = %d, want 200", resp.StatusCode)
+	}
+}
+
+// TestHealthzWithData covers the populated shape: ok, version, a growing
+// uptime, and a numeric last-write age.
+func TestHealthzWithData(t *testing.T) {
+	st := newStore(t)
+	cfg := config.Config{Targets: []config.Target{target("alpha", "https://alpha.example/health")}}
+	seed(t, st, "alpha", 2*time.Minute, checker.Result{Duration: time.Millisecond, Outcome: checker.OutcomeUp, StatusCode: 200})
+
+	base := newServer(t, cfg, st)
+
+	var first jsonHealth
+	status, body := getJSON(t, base+"/healthz", &first)
+	if status != http.StatusOK {
+		t.Fatalf("GET /healthz status = %d, want 200", status)
+	}
+	if !first.OK {
+		t.Error("ok = false, want true")
+	}
+	if first.Version != testVersion {
+		t.Errorf("version = %q, want %q", first.Version, testVersion)
+	}
+	if first.UptimeSeconds < 0 {
+		t.Errorf("uptime_seconds = %v, want >= 0", first.UptimeSeconds)
+	}
+	if first.LastWriteAgeSeconds == nil {
+		t.Fatalf("last_write_age_seconds = null, want a number; body = %s", body)
+	}
+	// The seeded row is 2 minutes old, so the age is in the tens of seconds or
+	// more but nowhere near an hour.
+	if *first.LastWriteAgeSeconds < 60 || *first.LastWriteAgeSeconds > 3600 {
+		t.Errorf("last_write_age_seconds = %v, want roughly 120", *first.LastWriteAgeSeconds)
+	}
+	if strings.Contains(string(body), `"last_write_age_seconds":null`) {
+		t.Errorf("body = %s, want a numeric age", body)
+	}
+
+	// Uptime grows between two probes.
+	time.Sleep(25 * time.Millisecond)
+	var second jsonHealth
+	if status, _ := getJSON(t, base+"/healthz", &second); status != http.StatusOK {
+		t.Fatalf("second GET /healthz status = %d, want 200", status)
+	}
+	if second.UptimeSeconds <= first.UptimeSeconds {
+		t.Errorf("uptime did not grow: %v then %v", first.UptimeSeconds, second.UptimeSeconds)
+	}
+	if second.LastWriteAgeSeconds == nil || *second.LastWriteAgeSeconds < *first.LastWriteAgeSeconds {
+		t.Errorf("last_write_age_seconds did not grow: %v then %v", first.LastWriteAgeSeconds, second.LastWriteAgeSeconds)
+	}
+}
+
+// TestHealthzNoData covers the empty-database shape: the age is null while the
+// process itself is still healthy.
+func TestHealthzNoData(t *testing.T) {
+	st := newStore(t)
+	base := newServer(t, config.Config{}, st)
+
+	var got jsonHealth
+	status, body := getJSON(t, base+"/healthz", &got)
+	if status != http.StatusOK {
+		t.Fatalf("GET /healthz status = %d, want 200", status)
+	}
+	if !got.OK {
+		t.Error("ok = false, want true")
+	}
+	if got.LastWriteAgeSeconds != nil {
+		t.Errorf("last_write_age_seconds = %v, want null", *got.LastWriteAgeSeconds)
+	}
+	if !strings.Contains(string(body), `"last_write_age_seconds":null`) {
+		t.Errorf("body = %s, want \"last_write_age_seconds\":null", body)
+	}
+	if !strings.Contains(string(body), `"ok":true`) {
+		t.Errorf("body = %s, want \"ok\":true", body)
 	}
 }
