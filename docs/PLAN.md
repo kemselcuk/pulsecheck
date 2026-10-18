@@ -253,7 +253,7 @@ All acceptance criteria above checked + the demo video embedded in the README + 
 
 # v1.2 Phase 3 — Hot reload (SIGHUP) (user-approved 2026-10-19)
 
-> **Status:** ✅ Implementation complete (2026-10-19); independent review and merge follow.
+> **Status:** ✅ Complete (2026-10-19) — implementation + independent review (APPROVE; the reviewer reproduced the full live scenario with its own process and pid checks, and re-ran the reload test under `-count=3 -race`). Findings closed: 2 nits (the reload test now also asserts the in-flight skip directly, and `TestReloadConfig` covers all four restart-required fields in a table) and 3 observations consciously kept (swap-before-schedule ordering, the documented theoretical `wg` window, and the per-request O(n) name lookups over config-sized lists).
 
 | Task | Content | Evidence |
 |---|---|---|
