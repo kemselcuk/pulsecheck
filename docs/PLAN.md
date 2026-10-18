@@ -231,7 +231,7 @@ All acceptance criteria above checked + the demo video embedded in the README + 
 
 # v1.2 Phase 1 — Body assertions + duration histogram (user-approved 2026-10-19)
 
-> **Status:** ✅ Implementation complete (2026-10-19); independent review and merge follow.
+> **Status:** ✅ Complete (2026-10-19) — implementation + independent review (APPROVE; the review live-reproduced every headline claim). Findings closed: 1 minor (the `Stats` doc comment now scopes the skipped-exclusion to the histogram/percentile fields — `AvgDurationMs` keeps its historical all-rows semantics), 1 nit (the metrics structural test now requires the declared base family to be a `histogram` before accepting `_bucket`/`_sum`/`_count` suffixes), 2 observations (the keep-alive comment is scoped to bodies within the cap; a TLS × body-mismatch pin proves the certificate is recorded on a failing assertion).
 
 | Task | Content | Evidence |
 |---|---|---|
