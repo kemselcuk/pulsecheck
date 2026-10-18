@@ -122,6 +122,8 @@
 
 ### Faz 7 — Son kabul
 
+> **Durum:** ✅ Tamamlandı (2026-10-18) — final whole-repo review: `glm-5.3-flash` (ilk turda CHANGES REQUESTED: CI uzlaşması → gerçek durum kanıtıyla düzeltildi + D29 kaydı → delta review APPROVE). Reviewer hükmü: "codebase itself is finished, honest, and thoroughly pinned". Tek açık kalem: kullanıcı `workflow` scope verdiğinde CI aktivasyonu (K9 kısmi → tam).
+
 | Görev | İçerik | Kabul ölçütleri |
 |---|---|---|
 | **T7.1 Full review** | Reviewer + orkestratör tüm repo üzerinden son tur; kabul ölçüt listesinin tamamı işaretlenir | Tüm testler `-race` yeşil; CI yeşil; README/decisions/PLAN güncel; kullanıcı nihai onayı verir |
