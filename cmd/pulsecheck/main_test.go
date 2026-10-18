@@ -111,3 +111,15 @@ func TestNewHandlerHealthzVersion(t *testing.T) {
 		t.Errorf("/healthz = %+v, want ok with version 1.1.0-test", got)
 	}
 }
+
+// TestVersionOutput pins the -version output format and, by reading the same
+// package-level var, the -ldflags "-X main.version=..." injection point.
+func TestVersionOutput(t *testing.T) {
+	old := version
+	version = "v9.9.9-test"
+	t.Cleanup(func() { version = old })
+
+	if got, want := versionOutput(), "pulsecheck v9.9.9-test"; got != want {
+		t.Errorf("versionOutput() = %q, want %q", got, want)
+	}
+}

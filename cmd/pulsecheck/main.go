@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -29,6 +30,12 @@ import (
 // log. It is a package-level var (not a const) so a release build can override
 // it with -ldflags "-X main.version=<version>".
 var version = "dev"
+
+// versionOutput is what -version prints: the binary name plus the (possibly
+// injected) build version.
+func versionOutput() string {
+	return "pulsecheck " + version
+}
 
 const (
 	// readHeaderTimeout bounds how long a client may take to send its request
@@ -100,7 +107,12 @@ func run() int {
 	// fresh `go run ./cmd/pulsecheck` works with no setup; point -config at a
 	// custom file for real use.
 	configPath := flag.String("config", "config.demo.json", "path to the JSON configuration file")
+	showVersion := flag.Bool("version", false, "print the build version and exit")
 	flag.Parse()
+	if *showVersion {
+		fmt.Println(versionOutput())
+		return 0
+	}
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
@@ -179,6 +191,14 @@ func run() int {
 		}
 		return 0
 	case <-ctx.Done():
+		// The first signal cancelled ctx; stop() restores the default signal
+		// disposition so a second SIGINT/SIGTERM during the drain terminates
+		// the process immediately — the classic force-exit behaviour. Without
+		// this, a second signal would be swallowed by the still-registered
+		// handler (D27). This holds where the signal was not inherited as
+		// ignored (a real terminal); POSIX keeps an inherited SIG_IGN ignored,
+		// which is what `cmd &` in a non-interactive shell produces.
+		stop()
 		logger.Info("shutdown: stopping checks")
 	}
 

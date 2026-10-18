@@ -1,4 +1,4 @@
-.PHONY: build test vet lint run demo clean
+.PHONY: build test vet lint fmt cover run demo clean
 
 # VERSION is baked into the service binary with -ldflags and reported by
 # /healthz, /metrics and the startup log. Override it for a release build:
@@ -23,6 +23,15 @@ vet:
 # and pins the version (v2.15.0) in its lint job.
 lint:
 	golangci-lint run
+
+# fmt rewrites the tree with gofmt.
+fmt:
+	gofmt -w .
+
+# cover runs the race suite with coverage and prints the statement total.
+cover:
+	go test -race -coverprofile=coverage.out ./...
+	go tool cover -func=coverage.out | tail -1
 
 # run starts the service with the bundled demo configuration. The default
 # -config path (config.demo.json) is relative to the working directory, so run
