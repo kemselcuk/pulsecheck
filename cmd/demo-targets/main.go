@@ -30,7 +30,7 @@ import (
 const shutdownTimeout = 5 * time.Second
 
 func main() {
-	addr := flag.String("addr", ":8081", "address the demo server listens on")
+	addr := flag.String("addr", ":18081", "address the demo server listens on")
 	slowDelay := flag.Duration("slow-delay", 8*time.Second, "how long GET /slow waits before responding")
 	flag.Parse()
 
