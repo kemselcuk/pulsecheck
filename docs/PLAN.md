@@ -150,3 +150,62 @@
 ## 6. Definition of done
 
 All acceptance criteria above checked + the demo video embedded in the README + CI green + the user's approval. `docs/PLAN.md` is updated with per-phase progress markers as work proceeds (☐ → ✅).
+
+---
+
+# v1.1 Roadmap (user-approved scoping, 2026-10-18)
+
+**Scope decisions:** /metrics + uptime% + /healthz + sparkline detail page · TLS certificate tracking + richer HTTP check definitions · config fuzzing + benchmark package · release pipeline + golangci-lint + the v1.0.0 tag. The state-change webhook stays **out of scope** (the user reconfirmed the original boundary). Working arrangement unchanged (same model split, same quality gate).
+
+## v1.1 Phase 1 — Richer checks (schema first; the base for the rest)
+
+> **Status:** ☐ Pending
+
+| Task | Content | Acceptance criteria |
+|---|---|---|
+| **T1.1-R Rich HTTP checks** | `targets[]` += `method` (default GET), `expected_status` (unset → up = 2xx; set → up = that code), `headers` (map), `follow_redirects` (default true). `checker.Check` update | Tests: expected_status honored (200→up, 500 configured→up on 500), method sent, headers sent, redirects follow/no-follow both classified; config validation for them |
+| **T1.2-R TLS cert tracking** | For `https://` targets the response's `resp.TLS.PeerCertificates[0].NotAfter` is read (zero extra dialing) and stored | A delayed/expiring certificate (< 30 days) is visible in the API + amber in the panel; a `http://` target stores NULL |
+| **T1.3-R Schema migration** | `results` += `cert_expires_at INTEGER` (nullable), added via an idempotent `ALTER TABLE` guarded by `PRAGMA table_info` | Reopen on an old DB migrates cleanly; new DBs are born with the column; `-race` tests prove migration + roundtrip |
+
+## v1.1 Phase 2 — Observability
+
+> **Status:** ☐ Pending
+
+| Task | Content | Acceptance criteria |
+|---|---|---|
+| **T2.1-R `/metrics`** | Prometheus text exposition, stdlib-only: `pulsecheck_target_up{target}` (gauge), `pulsecheck_check_duration_seconds{target}` (last), `pulsecheck_check_results_total{target,outcome}` (from the store), `pulsecheck_target_cert_expiry_days{target}`, `pulsecheck_last_check_timestamp_seconds{target}`, `pulsecheck_info` (version) | Format-valid per the Prometheus text spec; scrape answered from store queries (documented trade-off); tests assert lines for every target |
+| **T2.2-R Uptime %** | SQL-computed over the window; **`skipped` excluded from the denominator** (no check ran → not a failure) — recorded as D30 | `uptime_24h`/`uptime_7d` in `/api/status` per target; panel shows the percentages; tests with seeded mixes match hand-computed values |
+| **T2.3-R `/healthz`** | `{ok, version, uptime_seconds, last_write_age_seconds}` (max(started_at) from the store) | 200 + correct shape; last_write_age grows over time; version defaults to `dev` |
+| **T2.4-R Sparkline detail page** | `/targets/{name}`: an embedded single page with an SVG polyline of the last N durations (History limit 200); linked from the dashboard cards | 200 + an SVG element with polyline points for a seeded target; 404 for unknown names; zero external resources |
+
+## v1.1 Phase 3 — Robustness
+
+> **Status:** ☐ Pending
+
+| Task | Content | Acceptance criteria |
+|---|---|---|
+| **T3.1-R Config fuzzing** | `FuzzParse` via stdlib `testing.F`: random JSON must never panic and always produce either a config or a non-empty error; seed corpus = the bundled configs | `go test -fuzz=FuzzParse -fuzztime 60s` locally green with no crashers; the regression corpus is committed; normal `go test` runs the seeds |
+| **T3.2-R Benchmarks** | `BenchmarkCheck` (local httptest), `BenchmarkRecord`, `BenchmarkHistory` in checker + store; run in CI as evidence (not regression gates) | `go test -bench` outputs recorded in the README with a machine-dependence caveat; `-race`-free fast paths |
+| **T3.3-R CI fuzz step** | A time-boxed `go test -fuzz=FuzzParse -fuzztime 30s` step in the CI workflow | Green in CI; a crasher would fail the run |
+
+## v1.1 Phase 4 — Shipping
+
+> **Status:** ☐ Pending
+
+| Task | Content | Acceptance criteria |
+|---|---|---|
+| **T4.1-R Version injection** | `main.version` var set via `-ldflags "-X main.version=..."`; `make build` defaults to `dev`; /healthz + /metrics + the startup log report it | A `-ldflags`-built binary prints the injected version; tests for the healthz shape |
+| **T4.2-R golangci-lint in CI** | A separate lint job with a curated `.golangci.yml` (staticcheck + a small set; the current code must pass or be fixed) | A green lint job on push/PR; zero complaints on `main` |
+| **T4.3-R Release pipeline** | On pushing a `v*` tag: build static binaries for linux/amd64, linux/arm64, darwin/arm64 (+checksums) → publish a GitHub Release (€0) | A real tag produces a real release page with downloadable binaries; the pipeline file is in the repo |
+| **T4.4-R v1.0.0 tag** | After everything above is green: tag `v1.0.0` (the first release carries all v1.1 features) | The release page live; the binaries are downloadable and run |
+
+## v1.1 Phase 5 — Docs + final review
+
+> **Status:** ☐ Pending
+
+| Task | Content | Acceptance criteria |
+|---|---|---|
+| **T5.1-R Docs** | README: new config fields, /metrics, /healthz, uptime%, cert tracking, the detail page, fuzzing/benchmarks, the release; decisions D30+; PLAN markers | Every documented command is verified; no invented outputs |
+| **T5.2-R Final review** | A whole-repo delta review (reviewer + orchestrator) | All v1.1 acceptance criteria checked; the user's final approval |
+
+**Cost:** infrastructure €0 (GitHub Actions free tier, local everything). Tokens reported per phase.
