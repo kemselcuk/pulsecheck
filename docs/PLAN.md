@@ -1,6 +1,6 @@
 # PulseCheck — Uygulama Planı
 
-**Durum:** Onay bekliyor · **Tarih:** 2026-10-18
+**Durum:** ✅ Onaylandı ve uygulandı (2026-10-18) · Faz 0–6 tamam; tek açık kalem: CI aktivasyonu kullanıcı aksiyonu bekliyor (bkz. D29).
 **Sorumlu düzeni:** Kullanıcı = nihai kapsam ve uygulama onayı. Orkestratör (ben) = proje sorumlusu ve teknik kabul. Kod = `opencode-go/deepseek-v4.1-flash`, bağımsız review = `opencode-go/glm-5.3-flash`.
 
 ---

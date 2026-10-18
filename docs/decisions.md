@@ -148,3 +148,8 @@ Bu günlük CV/görüşme kanıtıdır: her kararın *neden* seçildiği buradan
 - **Bağlam:** T3 oturum tarayıcı aracı bu oturuma bağlı değildi; ekran kaydeden yerleşik araç da yok.
 - **Karar:** `make demo` canlı stack + Chrome'un headless CLI'ı (`--headless --screenshot --virtual-time-budget`) ile 2 sn aralıkla 36 kare + ffmpeg H.264 (`-framerate 0.5`, crf 27, faststart) → 72 sn MP4 (~64 KB). Kareler repoda tutulmaz (geçici dizin); `assets/demo.mp4` + statik `assets/demo.png` repo'ya girer.
 - **Gerekçe:** €0, betikle tekrar üretilebilir, README'ye gömülebilir boyut; ağır GIF/ekran kaydı araçlarına bağımlılık yok. (Faz 6, 2026-10-18.)
+
+### D29 — CI aktivasyonu ertelendi: dosya repoda değil, yerelde park edilmiş
+- **Bağlam:** GitHub, `workflow` scope'suz token'la CI dosyası içeren push'u reddetti; kullanıcı geçici olarak workflow'suz push'u seçti. Faz 7 final review'ı bu durumu yanlış okudu (çalışma ağacındaki dosyayı "takipli" sanıp CHANGES REQUESTED verdi) — ama gerçek nokta doğruydu: K9/D9'un "yeşil CI + badge" vaadi henüz **doğrulanmamış bir söz**.
+- **Karar:** `ci.yml` repoda yok (HEAD takipsiz, GitHub API 404 ile kanıtlı); dosya yerelde `.git/info/exclude` ile park edilmiş. Kullanıcı `gh auth refresh -h github.com -s workflow` ile scope verdiğinde: dosya geri eklenir, push edilir, ilk yeşil koşum README'ye badge ile kanıtlanır. O ana kadar K9 **kısmi**: CI dosyası hazır ve geçerli, koşum kanıtı bekliyor.
+- **Gerekçe:** Karar günlüğü disiplini, doğrulanmamış vaadi açıkça "beklemede" olarak işaretlemeyi gerektirir; Final review'ın talebi aslında zaten sağlanmış durumdaydı — kayıt bunu kanıtlarla sabitler. (Faz 7, 2026-10-18.)
