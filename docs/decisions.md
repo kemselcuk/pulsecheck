@@ -123,3 +123,23 @@ Bu günlük CV/görüşme kanıtıdır: her kararın *neden* seçildiği buradan
 - **Bağlam:** Bu makinede kullanıcının Docker hizmeti (mongo-express) `127.0.0.1:8081`'i tutuyordu; `demo-targets` IPv6 (::1) tarafına bağlandığından ilk koşum çalıştı ama süreç ölünce istekler IPv4'te Express'e düştü — tüm hedefler `down` oldu. Ek çevresel ders: varsayılan interval (10s) timeout'tan (5s) büyük olunca `skipped` davranışı canlıda asla görünmüyor.
 - **Karar:** Demo port `18081` (yaygın geliştirici portlarından uzak); `config.demo.json`'da `demo-slow` hedefi `interval: 3s` override'ı alıyor (timeout 5s > interval → in-flight skip'ler canlıda görünür). Doğrulama testi, hedef başına beklenen intervali pin'liyor.
 - **Gerekçe:** "Kolay yerel başlatma" vaadi, kullanıcının makinesinde zaten çalışan servislere çarpmamayı içerir; demo videosu (K10) da `skipped` kayıtlarını görünür kılmak zorunda. (Faz 4 canlı doğrulaması sırasında öğretildi, 2026-10-18.)
+
+### D24 — Shutdown: tek sinyal-context'i tüm yaşam döngüsünü yönetir
+- **Bağlam:** Faz 5'te checker, retention ve HTTP sunucusu tek bir `main`'de birleşiyor; kapanışta kimin kimi bekleyeceği belirsizdi.
+- **Karar:** `signal.NotifyContext(SIGINT, SIGTERM)` ile üretilen tek context hem checker'ın hem retention'ın context'idir. Sinyal gelince önce HTTP `Shutdown` (5 sn deadline) boşaltılır, sonra checker'ın dönüşü 10 sn hard cap ile beklenir, en son store kapatılır ve "shutdown complete" loglanır. Bekleme zaman aşımı → dürüst hata + `exit 1`.
+- **Gerekçe:** "İptal" için ikinci bir mekanizma (ek cancel fonksiyonu) yaratmak iki doğruluk kaynağı doğururdu; context zaten checker'ın iptal yoludur. Hard cap, bir hata durumunda sürecin sonsuza kadar asılı kalmasını yasaklar — "asla asılı kalma" vaadi test edilebilir bir çıkış koduyla garanti edilir. (Faz 5 implementasyonu, 2026-10-18.)
+
+### D25 — Docker: tek Dockerfile, iki binary, iki compose servisi
+- **Bağlam:** Servis ve demo hedefi ayrı programlar; "iki imaj mı, tek imaj mı" sorusu açıktı.
+- **Karar:** Tek çok aşamalı `Dockerfile` iki statik binary üretir (`/pulsecheck`, `/demo-targets`); tek son imaj `ENTRYPOINT ["/pulsecheck"]` taşır. Compose'da `demo-targets` servisi `entrypoint: ["/demo-targets"]` ile override eder; `pulsecheck` servisi ise `command: ["-config", "..."]` ile yalnızca argüman ekler.
+- **Gerekçe:** İki imaj imaj yönetimini ve build süresini ikiye katlar; tek imaj + iki entrypoint daha küçük ve yeterli. Docker `command`'ı `ENTRYPOINT`'ten SONRA eklediği için compose'da binary adını tekrar yazmak (görev metnindeki `command: /pulsecheck -config ...` biçimi) süreci `/pulsecheck /pulsecheck -config ...` yapardı; bu yüzden `command` yalnız argümanları taşır. (Faz 5, görev metninden bilinçli sapma, 2026-10-18.)
+
+### D26 — Runtime imajı: scratch değil alpine
+- **Bağlam:** Statik binary ile `scratch` en küçük imajı verir.
+- **Karar:** Son imaj `alpine:3.21` + `ca-certificates`, root olmayan `pulsecheck` kullanıcısı.
+- **Gerekçe:** `scratch` ne `ca-certificates` ne de bir kabuk içerir; `https://` hedefler (örnek config'de var) sessizce `x509` hatası verirdi ve hata ayıklama imkânsız olurdu. Kazanılan birkaç MB, gerçek dünyada çalışan bir imajın yanında önemsiz. (Faz 5, 2026-10-18.)
+
+### D27 — Bilinen kabul edilmiş davranışlar: hata yolları ve ikinci sinyal
+- **Bağlam:** Faz 5 review'ı iki "minor" sundu: (1) bind hatası / Shutdown hatası yollarında süreç, checker'ı beklemeden döner — `st.Close()` in-flight yazımla yarışabilir; (2) shutdown sırasında ikinci SIGINT yutulur, zorla çıkış yok.
+- **Karar:** İkisi de bilinçli olarak kabul edildi, düzeltilmedi. (1) için: `database/sql`'ın `Close`'u başlamış sorguların bitmesini bekler ve süreç zaten hatayla çıkıyor; happy path'te tam "drain-sonra-kapat" disiplini korunur. (2) için: 10 sn'lik checker hard-cap'i toplam yanıt vermezliği ~15 sn ile sınırlar; klasik "ikinci sinyal = zorla çıkış" davranışı gelecekte küçük bir `stop()` kaydırmasıyla eklenebilir.
+- **Gerekçe:** Küçük projede gözlemlenemeyen yarışlar için refactor, kapsam disiplinini bozar; davranışın belgelenmiş olması "gizli kusur" ile "bilinçli sınırlama"yı ayırır. (Faz 5 review, 2026-10-18.)

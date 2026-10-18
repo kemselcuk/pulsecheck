@@ -119,3 +119,57 @@ func TestDemoConfigLoads(t *testing.T) {
 		}
 	}
 }
+
+// TestDockerConfigLoads pins the compose configuration: config.docker.json must
+// mirror config.demo.json except that every target points at the compose
+// network's service name (demo-targets) instead of localhost, so the container
+// resolves its targets over the compose network rather than its own loopback.
+func TestDockerConfigLoads(t *testing.T) {
+	cfg, err := Load(repoFile(t, "config.docker.json"))
+	if err != nil {
+		t.Fatalf("Load(config.docker.json) error = %v", err)
+	}
+
+	if cfg.Server.Addr != ":8080" {
+		t.Errorf("Addr = %q, want %q", cfg.Server.Addr, ":8080")
+	}
+	if cfg.Storage.DBPath != "data/demo.db" {
+		t.Errorf("DBPath = %q, want %q", cfg.Storage.DBPath, "data/demo.db")
+	}
+	if cfg.Storage.Retention != DefaultRetention {
+		t.Errorf("Retention = %v, want the default %v", cfg.Storage.Retention, DefaultRetention)
+	}
+	if cfg.Defaults.Interval != 10*time.Second {
+		t.Errorf("Defaults.Interval = %v, want 10s", cfg.Defaults.Interval)
+	}
+	if cfg.Defaults.Timeout != 5*time.Second {
+		t.Errorf("Defaults.Timeout = %v, want the default 5s", cfg.Defaults.Timeout)
+	}
+	if cfg.Defaults.Workers != DefaultWorkers {
+		t.Errorf("Workers = %d, want the default %d", cfg.Defaults.Workers, DefaultWorkers)
+	}
+
+	wantPaths := []string{"/ok", "/broken", "/slow"}
+	wantIntervals := []time.Duration{10 * time.Second, 10 * time.Second, 3 * time.Second}
+	// The compose service name is what the container resolves; a revert to
+	// localhost here would make every target fail inside the compose network.
+	wantPrefix := "http://demo-targets:18081"
+	if len(cfg.Targets) != len(wantPaths) {
+		t.Fatalf("len(Targets) = %d, want %d demo targets", len(cfg.Targets), len(wantPaths))
+	}
+	for i, wantPath := range wantPaths {
+		target := cfg.Targets[i]
+		if target.Interval != wantIntervals[i] {
+			t.Errorf("targets[%d].Interval = %v, want %v", i, target.Interval, wantIntervals[i])
+		}
+		if !strings.HasPrefix(target.URL, wantPrefix) {
+			t.Errorf("targets[%d].URL = %q, want it to start with %q", i, target.URL, wantPrefix)
+		}
+		if target.Timeout != 5*time.Second {
+			t.Errorf("targets[%d].Timeout = %v, want the default 5s", i, target.Timeout)
+		}
+		if got := target.URL; len(got) < len(wantPath) || got[len(got)-len(wantPath):] != wantPath {
+			t.Errorf("targets[%d].URL = %q, want it to end with %q", i, got, wantPath)
+		}
+	}
+}

@@ -1,0 +1,29 @@
+# Local end-to-end demo:
+#
+#   docker compose up --build
+#   open http://localhost:8080
+#
+# Both services run the same image and differ only in which binary they run.
+# The image ENTRYPOINT is /pulsecheck (the service), so the demo-targets
+# service overrides `entrypoint`, while the pulsecheck service keeps the
+# ENTRYPOINT and only appends its config path through `command`. Docker
+# concatenates `command` AFTER `entrypoint`, so repeating the binary name in
+# `command` would run it twice.
+services:
+  demo-targets:
+    build: .
+    image: pulsecheck:local
+    entrypoint: ["/demo-targets"]
+    # Reachable inside the compose network as http://demo-targets:18081; not
+    # published to the host unless a ports: mapping is added.
+    expose:
+      - "18081"
+
+  pulsecheck:
+    build: .
+    image: pulsecheck:local
+    command: ["-config", "/etc/pulsecheck/config.docker.json"]
+    ports:
+      - "8080:8080"
+    depends_on:
+      - demo-targets

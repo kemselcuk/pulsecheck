@@ -1,0 +1,19 @@
+# Build artifacts and local runtime state never belong in the image.
+bin/
+data/
+*.db
+*.db-shm
+*.db-wal
+
+# VCS and CI metadata.
+.git/
+.github/
+
+# Documentation and screenshots: not needed to build the binaries.
+*.md
+docs/
+assets/
+
+# Test and coverage leftovers.
+coverage.out
+*.test
