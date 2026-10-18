@@ -27,5 +27,11 @@ jobs:
       - name: Test
         run: go test -race ./...
 
+      - name: Fuzz
+        run: go test -fuzz=FuzzParse -fuzztime 30s ./internal/config/ -run '^$'
+
+      - name: Bench
+        run: go test -bench . -benchtime 200x -run '^$' ./internal/checker/ ./internal/store/ -benchmem
+
       - name: Build
         run: go build ./...

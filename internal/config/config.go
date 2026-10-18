@@ -307,6 +307,12 @@ func parseHeaders(field string, raw map[string]string) (map[string]string, error
 		if trimmed == "" {
 			return nil, fmt.Errorf("config: %s contains an empty header name", field)
 		}
+		if _, dup := headers[trimmed]; dup {
+			// Two distinct raw keys such as "a" and " a" trim to the same name;
+			// letting a map pick the winner would make Parse non-deterministic
+			// (decision D32). Reject the configuration instead.
+			return nil, fmt.Errorf("config: %s contains duplicate header name %q after trimming", field, trimmed)
+		}
 		headers[trimmed] = value
 	}
 	return headers, nil
