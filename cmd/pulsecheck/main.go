@@ -17,7 +17,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"reflect"
 	"sort"
 	"syscall"
 	"time"
@@ -282,7 +281,7 @@ func reloadConfig(path string, live *config.Atomic, sched reloader, logger *slog
 		logger.Error("config reload: rejected, keeping the running configuration", "err", err)
 		return false
 	}
-	if targetsEqual(old.Targets, next.Targets) {
+	if config.TargetsEqual(old.Targets, next.Targets) {
 		logger.Info("config reload: no target changes")
 		return false
 	}
@@ -312,15 +311,10 @@ func runtimeCompatible(old, next *config.Config) error {
 	return nil
 }
 
-// targetsEqual reports whether two resolved target lists are identical. Parsed
-// targets are plain data (a regex is compared by value), so DeepEqual is the
-// full comparison.
-func targetsEqual(a, b []config.Target) bool {
-	return reflect.DeepEqual(a, b)
-}
-
 // diffTargets summarizes a reload for the log: which targets were added,
-// removed, or updated, sorted for a deterministic output.
+// removed, or updated, sorted for a deterministic output. Updates compare via
+// config.TargetEqual, which treats two parses of the same TLS configuration as
+// equivalent (D42).
 func diffTargets(old, next []config.Target) (added, removed, updated []string) {
 	oldByName := make(map[string]config.Target, len(old))
 	for _, t := range old {
@@ -332,7 +326,7 @@ func diffTargets(old, next []config.Target) (added, removed, updated []string) {
 			added = append(added, t.Name)
 			continue
 		}
-		if !reflect.DeepEqual(previous, t) {
+		if !config.TargetEqual(previous, t) {
 			updated = append(updated, t.Name)
 		}
 		delete(oldByName, t.Name)

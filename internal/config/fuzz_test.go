@@ -79,6 +79,11 @@ func FuzzParse(f *testing.F) {
 	f.Add(`{"targets":[{"name":"a","url":"https://example.com","method":"HEAD","expect_body_contains":"a"}]}`)
 	f.Add(`{"targets":[{"name":"a","url":"https://example.com","expect_body_regex":"["}]}`)
 	f.Add(`{"targets":[{"name":"a","url":"https://example.com","expect_body_contains":""}]}`)
+	// TLS options (D42): an accepting seed without file access plus the
+	// rejection classes that need no real file to exist.
+	f.Add(`{"targets":[{"name":"a","url":"https://example.com","tls":{"insecure_skip_verify":true}}]}`)
+	f.Add(`{"targets":[{"name":"a","url":"https://example.com","tls":{"ca_file":""}}]}`)
+	f.Add(`{"targets":[{"name":"a","url":"https://example.com","tls":{"ca_file":"/nonexistent/ca.pem"}}]}`)
 
 	f.Fuzz(func(t *testing.T, data string) {
 		cfg, err := Parse(strings.NewReader(data))
@@ -158,6 +163,10 @@ func FuzzParse(f *testing.F) {
 			}
 			if tg.Method == "HEAD" && (tg.ExpectBodyContains != "" || tg.ExpectBodyRegex != nil) {
 				t.Fatalf("Parse(%q) targets[%d] pairs HEAD with a body assertion", data, i)
+			}
+			// TLS options: a configured CA path always resolved into a pool.
+			if tg.TLS.CAFile != "" && tg.TLS.CAPool == nil {
+				t.Fatalf("Parse(%q) targets[%d]: CAFile is set without a pool", data, i)
 			}
 		}
 	})
