@@ -117,9 +117,10 @@ func Check(ctx context.Context, t config.Target, client *http.Client) (res Resul
 	}
 
 	// Always close the body, and drain a little first so the transport can
-	// reuse the keep-alive connection instead of tearing it down.
-	defer resp.Body.Close()
-	io.CopyN(io.Discard, resp.Body, 512)
+	// reuse the keep-alive connection instead of tearing it down. On a
+	// read-only body neither error is actionable, so both are explicit drops.
+	defer func() { _ = resp.Body.Close() }()
+	_, _ = io.CopyN(io.Discard, resp.Body, 512)
 
 	res.StatusCode = resp.StatusCode
 	switch {

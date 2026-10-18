@@ -100,22 +100,22 @@ func Open(path string) (*Store, error) {
 	// Force a connection now so an unusable path or bad DSN fails at Open
 	// instead of on the first query.
 	if err := db.Ping(); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, fmt.Errorf("store: ping %s: %w", path, err)
 	}
 
 	if _, err := db.Exec(`PRAGMA journal_mode = WAL`); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, fmt.Errorf("store: enable WAL for %s: %w", path, err)
 	}
 
 	s := &Store{db: db}
 	if err := s.createSchema(); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, err
 	}
 	if err := s.migrate(); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, err
 	}
 	return s, nil
@@ -159,7 +159,7 @@ func (s *Store) hasColumn(table, column string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("store: inspect %s schema: %w", table, err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	for rows.Next() {
 		var (
@@ -267,7 +267,7 @@ func (s *Store) History(target string, limit int) ([]checker.Result, error) {
 	if err != nil {
 		return nil, fmt.Errorf("store: history for %q: %w", target, err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	results := make([]checker.Result, 0, limit)
 	for rows.Next() {

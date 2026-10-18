@@ -92,7 +92,7 @@ func newMux(slowDelay time.Duration) *http.ServeMux {
 			return
 		}
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		fmt.Fprintf(w, `demo-targets
+		_, _ = fmt.Fprintf(w, `demo-targets
 
 GET /ok     -> 200 "ok"
 GET /broken -> 500 "broken"
@@ -126,7 +126,7 @@ GET /slow   -> 200 "slow" after %s
 func writeText(w http.ResponseWriter, status int, body string) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(status)
-	io.WriteString(w, body+"\n")
+	_, _ = io.WriteString(w, body+"\n")
 }
 
 // statusRecorder remembers the response status for request logging.

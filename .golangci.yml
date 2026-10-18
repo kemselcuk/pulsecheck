@@ -1,0 +1,22 @@
+# golangci-lint configuration (v2 schema).
+#
+# A curated set, not "everything": the standard linters (errcheck, govet,
+# ineffassign, staticcheck, unused) plus misspell, and gofmt as a formatter.
+# The bar is zero complaints on main; enabling a new linter means either the
+# code already passes or the same change fixes it.
+version: "2"
+
+linters:
+  default: standard
+  enable:
+    - misspell
+
+formatters:
+  enable:
+    - gofmt
+
+# Report everything: the curated bar is "zero complaints", so a capped list
+# would only hide how far the code is from it.
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

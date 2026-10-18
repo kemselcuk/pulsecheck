@@ -74,7 +74,7 @@ func getJSON(t *testing.T, url string, out any) (int, []byte) {
 	if err != nil {
 		t.Fatalf("GET %s: %v", url, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -422,7 +422,7 @@ func TestMethodNotAllowed(t *testing.T) {
 			t.Fatalf("POST %s: %v", path, err)
 		}
 		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 
 		if resp.StatusCode != http.StatusMethodNotAllowed {
 			t.Errorf("POST %s status = %d, want 405", path, resp.StatusCode)
@@ -450,7 +450,7 @@ func TestUnknownPathIsNotFound(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /api/unknown: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("status = %d, want 404", resp.StatusCode)
 	}
@@ -516,7 +516,7 @@ func TestNilLogger(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /api/status: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("status = %d, want 200", resp.StatusCode)
 	}

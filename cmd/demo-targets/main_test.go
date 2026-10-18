@@ -45,7 +45,7 @@ func TestNewMuxRoutes(t *testing.T) {
 			if err != nil {
 				t.Fatalf("GET %s error = %v", tt.path, err)
 			}
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 
 			body, err := io.ReadAll(resp.Body)
 			if err != nil {
@@ -69,7 +69,7 @@ func TestIndexRoute(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET / error = %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -88,7 +88,7 @@ func TestIndexRoute(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /nope error = %v", err)
 	}
-	defer missing.Body.Close()
+	defer func() { _ = missing.Body.Close() }()
 	if missing.StatusCode != http.StatusNotFound {
 		t.Errorf("GET /nope status = %d, want %d", missing.StatusCode, http.StatusNotFound)
 	}
@@ -103,7 +103,7 @@ func TestSlowWaitsThenSucceeds(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /slow error = %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	elapsed := time.Since(start)
 
 	body, err := io.ReadAll(resp.Body)
@@ -144,7 +144,7 @@ func TestSlowHonorsContextCancellation(t *testing.T) {
 	cancel()
 	<-done
 	if resp != nil {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 	}
 
 	if err == nil {

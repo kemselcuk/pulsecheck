@@ -90,7 +90,7 @@ func TestOpenCreatesSchemaIdempotently(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
-	defer second.Close()
+	defer func() { _ = second.Close() }()
 
 	got, ok, err := second.Latest("api")
 	if err != nil {
