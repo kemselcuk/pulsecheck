@@ -1,0 +1,55 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.x'
+
+      # The guard re-runs the race suite so a tag can never publish a tree
+      # whose tests do not pass (the tag policy is "only after CI is green on
+      # main", but the pipeline does not trust that alone).
+      - name: Test
+        run: go test -race -count=1 ./...
+
+      - name: Build static binaries
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for target in linux/amd64 linux/arm64 darwin/arm64; do
+            goos="${target%%/*}"
+            goarch="${target##*/}"
+            name="pulsecheck_${VERSION}_${goos}_${goarch}"
+            CGO_ENABLED=0 GOOS="${goos}" GOARCH="${goarch}" go build \
+              -trimpath -ldflags "-s -w -X main.version=${VERSION}" \
+              -o "dist/${name}/pulsecheck" ./cmd/pulsecheck
+            tar -C "dist/${name}" -czf "dist/${name}.tar.gz" pulsecheck
+            rm -rf "dist/${name}"
+          done
+          (cd dist && sha256sum ./*.tar.gz > checksums.txt)
+          ls -l dist
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            dist/*.tar.gz dist/checksums.txt \
+            --repo "${GITHUB_REPOSITORY}" \
+            --generate-notes

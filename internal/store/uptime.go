@@ -65,7 +65,7 @@ func (s *Store) OutcomeCounts(target string, window time.Duration) (map[checker.
 	if err != nil {
 		return nil, fmt.Errorf("store: outcome counts for %q: %w", target, err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	for rows.Next() {
 		var (

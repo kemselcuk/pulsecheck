@@ -70,7 +70,7 @@ func TestNewHandlerMountsEveryRoute(t *testing.T) {
 			t.Fatalf("%s %s: %v", tc.method, tc.path, err)
 		}
 		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 
 		if resp.StatusCode != tc.want {
 			t.Errorf("%s %s status = %d, want %d", tc.method, tc.path, resp.StatusCode, tc.want)
@@ -97,7 +97,7 @@ func TestNewHandlerHealthzVersion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /healthz: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	var got struct {
 		OK      bool    `json:"ok"`

@@ -47,7 +47,7 @@ func get(t *testing.T, srv *httptest.Server, path string) (int, string, string) 
 	if err != nil {
 		t.Fatalf("GET %s: %v", path, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {

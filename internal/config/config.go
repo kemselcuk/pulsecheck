@@ -237,7 +237,9 @@ func Load(path string) (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("config: %w", err)
 	}
-	defer f.Close()
+	// A read-only file's close error is not actionable, so it is an explicit
+	// drop.
+	defer func() { _ = f.Close() }()
 
 	return Parse(f)
 }

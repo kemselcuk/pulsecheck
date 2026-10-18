@@ -39,7 +39,7 @@ func scrape(t *testing.T, cfg config.Config, st *store.Store) string {
 	if err != nil {
 		t.Fatalf("GET /metrics: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("GET /metrics status = %d, want 200", resp.StatusCode)
@@ -265,7 +265,7 @@ func TestMetricsMethodNotAllowed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("POST /metrics: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusMethodNotAllowed {
 		t.Errorf("POST /metrics status = %d, want 405", resp.StatusCode)
@@ -294,7 +294,7 @@ func TestMetricsUnknownPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /other: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("GET /other status = %d, want 404", resp.StatusCode)
@@ -323,7 +323,7 @@ func TestMetricsStoreError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /metrics: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusInternalServerError {
 		t.Errorf("status = %d, want 500", resp.StatusCode)
 	}
@@ -341,7 +341,7 @@ func TestMetricsNilStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /metrics: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusInternalServerError {
 		t.Errorf("status = %d, want 500", resp.StatusCode)
 	}
