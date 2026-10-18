@@ -108,3 +108,13 @@ Bu günlük CV/görüşme kanıtıdır: her kararın *neden* seçildiği buradan
 - **Bağlam:** Graceful shutdown in-flight kontrolü context iptaliyle keser; bu sonucun kaydedilip kaydedilmeyeceği belirsizdi.
 - **Karar:** Kaydedilir (outcome `error`, Err "context canceled"); kuyu-şekillendirme (filtreleme) gerekiyorsa store/UI katmanında yapılır. Checker bilgiyi gizlemez.
 - **Gerekçe:** Kayıt doğrudur (kontrol gerçekten yarıda kaldı); checker'ın içinden filtrelemek bilgi kaybıdır ve test edilebilirliği düşürür. Faz 2 review kararı.
+
+### D21 — Retention'da yanlış yapılandırma: veri yıkımı asla sessiz olmaz
+- **Bağlam:** Faz 3 review'ı bir "minor" bulgu sundu: `window <= 0` iken temizleyici tüm tabloyu siliyordu (cutoff ≥ now olur). Üretimde config doğrulaması engelliyor ama programatik kullanım savunmasızdı.
+- **Karar:** `window <= 0` → retention tamamen devre dışı + yüksek sesle `Warn`; `deleteOlderThan` da no-op döner (çift emniyet). `period <= 0` zaten tek koşum + Warn ile işliyor — asimetri giderildi. İki yeni test pin'ledi.
+- **Gerekçe:** "Silme"nin hata modu hiçbir zaman "hepsini sil" olmamalı; bastırılmış veri kaybı, uyarılı atalemeden daha kötüdür. (Faz 3 review bulgusu, orkestratör yaması, 2026-10-18.)
+
+### D22 — `Record`/`RecordResult` ayrımı
+- **Bağlam:** `checker.Recorder` interface'i hata dönüşü içermiyor; store'un hata bildiren yazım fonksiyonu da isteniyordu — Go overloading istemediği için tek imzayla ikisi yapılamaz.
+- **Karar:** `Record(Result)` interface'i karşılar (kalıcılık hatasını loglar), `RecordResult(Result) error` hata gereken çağıranlar için. Compile-time assertion: `var _ checker.Recorder = (*Store)(nil)`.
+- **Gerekçe:** Faz 2 interface'ini şimdi değiştirmek `MemoryRecorder` + scheduler'ı gereksiz yere sarsar; hata kanalına gerçek bir ihtiyaç doğarsa o zaman değiştirilir. `r.URL`'yi saklamama kararı da burada: hedefler config'den gelir, `target` doğal anahtar — saklasaydık config değişince bayat kopya sorunu doğardı. (Faz 3 review kararı.)
