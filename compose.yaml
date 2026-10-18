@@ -27,3 +27,13 @@ services:
       - "8080:8080"
     depends_on:
       - demo-targets
+    # The service ships its own liveness endpoint; let Docker use it instead of
+    # a bare TCP check. Only this service gets a healthcheck: the image also
+    # runs demo-targets, which serves no /healthz.
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
+      interval: 30s
+      start_interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 5s

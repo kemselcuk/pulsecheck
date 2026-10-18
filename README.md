@@ -86,6 +86,8 @@ $ make build VERSION=v1.0.0
 $ ./bin/pulsecheck -config config.example.json &
 $ curl -s localhost:8080/healthz
 {"ok":true,"version":"v1.0.0","uptime_seconds":25.032,"last_write_age_seconds":0.031}
+$ ./bin/pulsecheck -version
+pulsecheck v1.0.0
 ```
 
 ## Configuration
@@ -286,11 +288,13 @@ Full decision log: [`docs/decisions.md`](docs/decisions.md) · Implementation pl
 $ make test        # go test -race ./...
 $ make vet         # go vet ./...
 $ make lint        # golangci-lint run with the repository's .golangci.yml
+$ make fmt         # gofmt -w .
+$ make cover       # race suite with coverage; prints the statement total
 $ go test -fuzz=FuzzParse -fuzztime 60s ./internal/config/    # native fuzzing
 $ go test -bench . -benchtime 200x -run '^$' ./internal/checker/ ./internal/store/ -benchmem
 ```
 
-CI ([`ci.yml`](.github/workflows/ci.yml)) runs four gates on every push to `main` (and to `faz-*` phase branches) and every pull request: `go vet` + `go test -race`, a 30 s fuzz step, a benchmark evidence step, and a separate `lint` job (golangci-lint pinned to v2.15.0, uncapped reporting, zero complaints). The [`release.yml`](.github/workflows/release.yml) pipeline re-runs the race suite as a guard before publishing any tag.
+CI ([`ci.yml`](.github/workflows/ci.yml)) runs four gates on every push to `main` (and to `faz-*` phase branches) and every pull request: `go vet` + `go test -race`, a 30 s fuzz step, a benchmark evidence step, and a separate `lint` job (golangci-lint pinned to v2.15.0, uncapped reporting, zero complaints). The [`release.yml`](.github/workflows/release.yml) pipeline re-runs the race suite as a guard before publishing any tag. Statement coverage (measured with `make cover`, 2026-10-19): **81.9%** total — `internal/config` sits at 100%, while the two `cmd` packages stay lower on purpose: they are thin wiring around tested packages.
 
 Which test proves which promise:
 
@@ -373,7 +377,7 @@ A 72-second recording of a real run — three targets side by side:
 
 [![PulseCheck status dashboard](assets/demo.png)](assets/demo.mp4)
 
-▶ **[Watch the demo video: assets/demo.mp4](assets/demo.mp4)** (72 s, ~64 KB — visible in the video: `demo-ok` stays continuously `up`, `demo-broken` stays continuously `down`, and while `demo-slow` accumulates `skipped`/`timeout` it **never blocks the other targets**; in the dot strip the `skipped` reason shows as "previous check still in flight"). The recording predates the v1.1 observability additions; the cards now also carry an uptime line, per-card certificate text, and a link to each target's detail page.
+▶ **[Watch the demo video: assets/demo.mp4](assets/demo.mp4)** (72 s, ~110 KB — visible in the video: `demo-ok` stays continuously `up`, `demo-broken` stays continuously `down`, and while `demo-slow` accumulates `skipped`/`timeout` it **never blocks the other targets**; in the dot strip the `skipped` reason shows as "previous check still in flight". The dashboard cards carry their uptime lines, and the clip ends on `demo-slow`'s detail page, where the duration sparkline shows the timeout/skip pattern directly.)
 
 The video was produced entirely locally with a reproducible pipeline (€0): live stack via `make demo` + 36 screenshots every 2 s via Chrome headless CLI + ffmpeg H.264 assembly. (Decision log: D28.)
 
