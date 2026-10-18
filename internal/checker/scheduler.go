@@ -187,6 +187,17 @@ func (s *Scheduler) clientsFor(t config.Target) (client, noRedirect *http.Client
 	return &base, twin
 }
 
+// closeIdleConnections releases the idle connections of a runner's DERIVED
+// client pair when it is replaced or removed. The shared pair is left alone:
+// other targets are still using it.
+func (s *Scheduler) closeIdleConnections(runner *targetRunner) {
+	if runner.client == s.client {
+		return
+	}
+	runner.client.CloseIdleConnections()
+	runner.noRedirectClient.CloseIdleConnections()
+}
+
 // transportWithTLS returns a transport that applies the target's TLS settings.
 // A clone of the base *http.Transport is adjusted (TLS config cloned first, so
 // a shared transport is never mutated); non-*http.Transport round trippers
@@ -290,6 +301,7 @@ func (s *Scheduler) Reload(cfg config.Config) {
 		}
 		var prev *targetRunner
 		if ok {
+			s.closeIdleConnections(existing)
 			close(existing.stop)
 			// Carry state across the update so a check that is still running
 			// keeps guarding its target until it records (D41).
@@ -301,6 +313,7 @@ func (s *Scheduler) Reload(cfg config.Config) {
 	}
 	for name, runner := range s.runners {
 		if _, ok := seen[name]; !ok {
+			s.closeIdleConnections(runner)
 			close(runner.stop)
 			delete(s.runners, name)
 		}

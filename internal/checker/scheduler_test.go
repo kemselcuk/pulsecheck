@@ -463,6 +463,12 @@ func TestSchedulerTLSClients(t *testing.T) {
 	if caRes.CertExpiresAt.IsZero() {
 		t.Error("ca target: certificate not recorded")
 	}
+	// The non-following twin carries the same TLS adjustment: exercise it
+	// against the self-signed server directly.
+	caRunner := sched.runners["ca"]
+	if res := Check(context.Background(), caRunner.target, caRunner.noRedirectClient); res.Outcome != OutcomeUp {
+		t.Errorf("non-following twin: Outcome = %q (err=%q), want up", res.Outcome, res.Err)
+	}
 	if res := check("insecure"); res.Outcome != OutcomeUp {
 		t.Errorf("insecure target: Outcome = %q (err=%q), want up", res.Outcome, res.Err)
 	}
