@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"strconv"
 	"time"
@@ -32,6 +33,11 @@ const (
 	// statsWindow is the look-back period of the per-target statistics.
 	statsWindow = 24 * time.Hour
 
+	// uptimeWindow24h and uptimeWindow7d are the look-back periods of the
+	// per-target uptime figures reported by /api/status.
+	uptimeWindow24h = 24 * time.Hour
+	uptimeWindow7d  = 7 * 24 * time.Hour
+
 	// genericErrorMessage is the only message ever sent to a client for an
 	// internal failure; the real error goes to the logger instead.
 	genericErrorMessage = "internal error"
@@ -50,6 +56,11 @@ type targetStatus struct {
 	Last   *resultView `json:"last"`
 	Recent []string    `json:"recent"`
 	Stats  statsView   `json:"stats"`
+	// Uptime24h and Uptime7d are percentages rounded to one decimal place, or
+	// null when the window holds no completed check (store.Uptime's hasData).
+	// Skipped rows are excluded from the percentage by the store (decision D30d).
+	Uptime24h *float64 `json:"uptime_24h"`
+	Uptime7d  *float64 `json:"uptime_7d"`
 }
 
 // resultView is the JSON shape shared by the "last" field and the elements of
@@ -73,6 +84,19 @@ type statsView struct {
 	AvgDurationMs int64 `json:"avg_duration_ms"`
 }
 
+// healthResponse is the body of GET /healthz.
+type healthResponse struct {
+	OK      bool   `json:"ok"`
+	Version string `json:"version"`
+	// UptimeSeconds is the process uptime in seconds. It carries millisecond
+	// resolution (three decimals) so the value visibly grows between two rapid
+	// probes rather than staying pinned at a whole second.
+	UptimeSeconds float64 `json:"uptime_seconds"`
+	// LastWriteAgeSeconds is how long ago the newest check was recorded, or null
+	// when the database holds no results at all.
+	LastWriteAgeSeconds *float64 `json:"last_write_age_seconds"`
+}
+
 // errorResponse is the body of every error reply.
 type errorResponse struct {
 	Error string `json:"error"`
@@ -81,26 +105,33 @@ type errorResponse struct {
 // apiServer holds the read-only dependencies of the handlers. It is a plain
 // struct rather than a global so tests can build it without binding a port.
 type apiServer struct {
-	targets []config.Target
-	byName  map[string]struct{}
-	store   *store.Store
-	logger  *slog.Logger
+	targets   []config.Target
+	byName    map[string]struct{}
+	store     *store.Store
+	version   string
+	startedAt time.Time
+	logger    *slog.Logger
 }
 
 // New returns the HTTP handler for the read-only JSON API.
 //
+// version is reported verbatim by /healthz. startedAt is captured here so the
+// reported process uptime is measured from handler construction.
+//
 // A nil logger falls back to one that discards output, so a caller cannot panic
 // on a missing dependency. The returned handler is safe for concurrent use.
-func New(cfg config.Config, st *store.Store, logger *slog.Logger) http.Handler {
+func New(cfg config.Config, st *store.Store, version string, logger *slog.Logger) http.Handler {
 	if logger == nil {
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 
 	s := &apiServer{
-		targets: cfg.Targets,
-		byName:  make(map[string]struct{}, len(cfg.Targets)),
-		store:   st,
-		logger:  logger,
+		targets:   cfg.Targets,
+		byName:    make(map[string]struct{}, len(cfg.Targets)),
+		store:     st,
+		version:   version,
+		startedAt: time.Now(),
+		logger:    logger,
 	}
 	for _, t := range cfg.Targets {
 		s.byName[t.Name] = struct{}{}
@@ -114,6 +145,8 @@ func New(cfg config.Config, st *store.Store, logger *slog.Logger) http.Handler {
 	mux.HandleFunc("/api/status", s.handleMethodNotAllowed)
 	mux.HandleFunc("GET /api/history/{name}", s.handleHistory)
 	mux.HandleFunc("/api/history/{name}", s.handleMethodNotAllowed)
+	mux.HandleFunc("GET /healthz", s.handleHealthz)
+	mux.HandleFunc("/healthz", s.handleMethodNotAllowed)
 
 	return mux
 }
@@ -180,7 +213,63 @@ func (s *apiServer) targetStatus(t config.Target) (targetStatus, error) {
 		AvgDurationMs: stats.AvgDurationMs,
 	}
 
+	// Uptime is reported for two windows. hasData is false for an empty window
+	// (or one holding only skipped rows), which stays null rather than becoming
+	// a misleading 0%.
+	for _, u := range []struct {
+		window time.Duration
+		dst    **float64
+	}{
+		{uptimeWindow24h, &ts.Uptime24h},
+		{uptimeWindow7d, &ts.Uptime7d},
+	} {
+		percent, hasData, err := s.store.Uptime(t.Name, u.window)
+		if err != nil {
+			return targetStatus{}, err
+		}
+		if hasData {
+			value := percent
+			*u.dst = &value
+		}
+	}
+
 	return ts, nil
+}
+
+// handleHealthz reports process liveness plus the build version and how fresh
+// the stored data is. A failing store is reported as 500: the endpoint answers
+// "is this process healthy", and a process whose database cannot be read is not.
+func (s *apiServer) handleHealthz(w http.ResponseWriter, _ *http.Request) {
+	resp := healthResponse{
+		OK:            true,
+		Version:       s.version,
+		UptimeSeconds: roundSeconds(time.Since(s.startedAt).Seconds()),
+	}
+
+	if s.store == nil {
+		s.logger.Error("api: healthz requested without a store")
+		writeError(w, http.StatusInternalServerError, genericErrorMessage)
+		return
+	}
+
+	lastWrite, ok, err := s.store.LastWriteTime()
+	if err != nil {
+		s.logger.Error("api: healthz last write time", "err", err)
+		writeError(w, http.StatusInternalServerError, genericErrorMessage)
+		return
+	}
+	if ok {
+		age := roundSeconds(time.Since(lastWrite).Seconds())
+		resp.LastWriteAgeSeconds = &age
+	}
+
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// roundSeconds rounds a duration in seconds to millisecond resolution, which is
+// plenty for a health probe and keeps the JSON compact.
+func roundSeconds(seconds float64) float64 {
+	return math.Round(seconds*1000) / 1000
 }
 
 // handleHistory returns the newest results of one configured target as a JSON

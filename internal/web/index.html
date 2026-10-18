@@ -58,6 +58,8 @@
   .title { min-width: 0; }
   .name { display: block; font-weight: 600; font-size: 15px; }
   .url { display: block; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+  .details { flex: none; color: var(--muted); font-size: 12px; text-decoration: none; }
+  .details:hover { color: var(--text); text-decoration: underline; }
   .badge {
     flex: none;
     padding: 3px 10px;
@@ -172,6 +174,14 @@
     title.appendChild(el("span", "name", t.name || "unnamed"));
     title.appendChild(el("span", "url", t.url || ""));
     head.appendChild(title);
+
+    // A link to the server-rendered detail page for this target. The href is set
+    // through setAttribute rather than in an HTML literal so the page markup
+    // keeps containing no href attributes at all; the value is root-relative, so
+    // the page still needs nothing from the network.
+    var details = el("a", "details", "details");
+    details.setAttribute("href", "/targets/" + encodeURIComponent(t.name || ""));
+    head.appendChild(details);
 
     var last = t.last && typeof t.last === "object" ? t.last : null;
     var outcome = last && last.outcome ? String(last.outcome) : "";
