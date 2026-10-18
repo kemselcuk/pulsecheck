@@ -180,7 +180,7 @@ All acceptance criteria above checked + the demo video embedded in the README + 
 
 ## v1.1 Phase 3 — Robustness
 
-> **Status:** ☐ Pending
+> **Status:** ✅ Complete (2026-10-18) — implementation + review + acceptance. 60s fuzz: 3,555,538 execs, 0 crashers; 4 benchmarks; CI Fuzz+Bench steps; the review confirmed the evidence (its own 30s fuzz + metrics runs), flagged the docs rider (consciously absorbed: D30/D31/D32 records are the orchestrator's) and two nits — both closed (combined-test had already landed; two new metric seeds added). D30/D31/D32 recorded.
 
 | Task | Content | Acceptance criteria |
 |---|---|---|

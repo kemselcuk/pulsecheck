@@ -480,6 +480,20 @@ func TestLoad(t *testing.T) {
 	}
 }
 
+// TestParseHeaderNameCollisions pins the determinism fix from D32: two distinct
+// raw header keys that trim to the same name must be rejected at Parse time so
+// a Go map's iteration order never decides the effective value.
+func TestParseHeaderNameCollisions(t *testing.T) {
+	raw := `{"targets":[{"name":"a","url":"https://example.com","headers":{"X-Trace":"1"," X-Trace":"2"}}]}`
+	cfg, err := Parse(strings.NewReader(raw))
+	if err == nil {
+		t.Fatalf("Parse accepted colliding header names: %+v", cfg)
+	}
+	if !strings.Contains(err.Error(), "duplicate header name") {
+		t.Errorf("error = %q, want it to mention a duplicate header name", err.Error())
+	}
+}
+
 func TestLoadMissingFile(t *testing.T) {
 	_, err := Load(t.TempDir() + "/does-not-exist.json")
 	if err == nil {
