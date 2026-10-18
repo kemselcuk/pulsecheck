@@ -113,6 +113,8 @@
 
 ### Faz 6 — Demo videosu
 
+> **Durum:** ✅ Tamamlandı (2026-10-18) — orkestratör işi: `make demo` canlı stack + Chrome headless 36 kare + ffmpeg → `assets/demo.mp4` (72 sn, ~64 KB) + `assets/demo.png`; README'ye gömüldü (D28). Videoda üç hedefin davranışı ve skipped görünümü net.
+
 | Görev | İçerik | Kabul ölçütleri |
 |---|---|---|
 | **T6.1 ffmpeg keşfi** | `ffmpeg -version` kontrolü; yoksa kurulum önerisi veya yedeğe geç | Kurulum **öncesi** netleştirildi (sürpriz yok) |

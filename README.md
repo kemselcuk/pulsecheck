@@ -231,7 +231,13 @@ $ docker compose down
 
 ## Demo videosu
 
-**TODO: Faz 6** — durum paneli ekran görüntülerinden üretilen MP4 buraya eklenecek.
+72 saniyelik gerçek koşum kaydı — üç hedef yan yana:
+
+[![PulseCheck durum paneli](assets/demo.png)](assets/demo.mp4)
+
+▶ **[Demo videosunu izle: assets/demo.mp4](assets/demo.mp4)** (72 sn, ~64 KB — panelde görünür: `demo-ok` kesintisiz `up`, `demo-broken` kesintisiz `down`, `demo-slow` ise `skipped`/`timeout` biriktirirken **diğer hedefleri hiç bloklamaz**; ayak şeridinde `skipped` nedeni "previous check still in flight" olarak görünür).
+
+Video tamamen yerelde, tekrarlanabilir bir boru hattıyla üretildi (€0): `make demo` ile canlı stack + Chrome headless CLI ile 2 sn aralıklı 36 ekran görüntüsü + ffmpeg H.264 derlemesi. (Karar günlüğü: D28.)
 
 ## Lisans
 

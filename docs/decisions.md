@@ -143,3 +143,8 @@ Bu günlük CV/görüşme kanıtıdır: her kararın *neden* seçildiği buradan
 - **Bağlam:** Faz 5 review'ı iki "minor" sundu: (1) bind hatası / Shutdown hatası yollarında süreç, checker'ı beklemeden döner — `st.Close()` in-flight yazımla yarışabilir; (2) shutdown sırasında ikinci SIGINT yutulur, zorla çıkış yok.
 - **Karar:** İkisi de bilinçli olarak kabul edildi, düzeltilmedi. (1) için: `database/sql`'ın `Close`'u başlamış sorguların bitmesini bekler ve süreç zaten hatayla çıkıyor; happy path'te tam "drain-sonra-kapat" disiplini korunur. (2) için: 10 sn'lik checker hard-cap'i toplam yanıt vermezliği ~15 sn ile sınırlar; klasik "ikinci sinyal = zorla çıkış" davranışı gelecekte küçük bir `stop()` kaydırmasıyla eklenebilir.
 - **Gerekçe:** Küçük projede gözlemlenemeyen yarışlar için refactor, kapsam disiplinini bozar; davranışın belgelenmiş olması "gizli kusur" ile "bilinçli sınırlama"yı ayırır. (Faz 5 review, 2026-10-18.)
+
+### D28 — Demo videosu üretim hattı: Chrome headless + ffmpeg, tamamen yerel
+- **Bağlam:** T3 oturum tarayıcı aracı bu oturuma bağlı değildi; ekran kaydeden yerleşik araç da yok.
+- **Karar:** `make demo` canlı stack + Chrome'un headless CLI'ı (`--headless --screenshot --virtual-time-budget`) ile 2 sn aralıkla 36 kare + ffmpeg H.264 (`-framerate 0.5`, crf 27, faststart) → 72 sn MP4 (~64 KB). Kareler repoda tutulmaz (geçici dizin); `assets/demo.mp4` + statik `assets/demo.png` repo'ya girer.
+- **Gerekçe:** €0, betikle tekrar üretilebilir, README'ye gömülebilir boyut; ağır GIF/ekran kaydı araçlarına bağımlılık yok. (Faz 6, 2026-10-18.)
