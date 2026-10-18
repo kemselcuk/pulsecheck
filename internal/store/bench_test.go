@@ -94,10 +94,12 @@ func BenchmarkLatest(b *testing.B) {
 
 // BenchmarkStatusReadPaths compares the two ways a full dashboard poll can
 // read the store: the per-target path /api/status used before (Latest, a
-// 30-row History, Stats, and both uptime windows per target — five to six
-// queries each) against the batched StatusSnapshot (five grouped queries in
-// total, D40). The store is seeded once with 200 targets × 2880 rows — 24 h at
-// the 30 s default interval, ~576k rows — before either timer starts.
+// 30-row History, Stats, and both uptime windows per target — four window
+// scans each) against the shipped StatusSnapshot, whose cost is dominated by
+// ONE merged aggregate scan per target (D40). A third sub-benchmark isolates
+// that merged phase, so its numbers are reproducible from this file alone. The
+// store is seeded once with 200 targets × 2880 rows — 24 h at the 30 s default
+// interval, ~576k rows — before any timer starts.
 func BenchmarkStatusReadPaths(b *testing.B) {
 	s := benchStore(b)
 	const (
@@ -122,6 +124,19 @@ func BenchmarkStatusReadPaths(b *testing.B) {
 		for i := 0; i < b.N; i++ {
 			if _, err := s.StatusSnapshot(names); err != nil {
 				b.Fatalf("StatusSnapshot: %v", err)
+			}
+		}
+	})
+
+	b.Run("merged-aggregates", func(b *testing.B) {
+		now := time.Now().UnixMilli()
+		cutoff24h := now - snapshotWindow24h.Milliseconds()
+		cutoff7d := now - snapshotWindow7d.Milliseconds()
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			if _, err := s.snapshotAggregates(names, cutoff24h, cutoff7d); err != nil {
+				b.Fatalf("snapshotAggregates: %v", err)
 			}
 		}
 	})

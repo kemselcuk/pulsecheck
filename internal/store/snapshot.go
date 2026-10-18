@@ -55,10 +55,11 @@ type TargetSnapshot struct {
 //     never scans the full history the way a window function over the whole
 //     (target IN ...) set did in the measured-bad variant.
 //
-// At the benchmark scale the snapshot polls in ~0.65 s against ~1.0-1.2 s for
-// the original path (two samples each, BenchmarkStatusReadPaths); a probe of
-// the aggregate portion alone measured ~17k allocations versus ~122k for the
-// previous split reads. Every requested name gets an entry — an unknown
+// At the benchmark scale the snapshot polls in ~0.65 s against ~1.0 s for the
+// original path (two samples each, BenchmarkStatusReadPaths); the merged
+// aggregate phase — isolated as that benchmark's third sub-run — is the
+// dominant cost and allocates ~23k objects per poll. Every requested name gets
+// an entry — an unknown
 // or empty target yields the zero snapshot (an empty recent strip, a full zero
 // histogram, nil uptimes) — so callers can assemble their payload without
 // existence checks. The equivalence with the per-target primitives (Latest,
@@ -109,78 +110,33 @@ func (s *Store) StatusSnapshot(targets []string) (map[string]TargetSnapshot, err
 		out[name] = entry
 	}
 
-	// 3) The merged per-target aggregate: one index-range scan per target that
-	// produces the 24 h outcome counts, the 7 d outcome counts, the 24 h
-	// duration buckets and sums, and the all-rows 24 h sum/count the average
-	// needs (the average deliberately includes the 0 ms skipped rows, matching
-	// Stats' historical semantics). The cutoffs are inlined as integer literals
-	// — internal instants, no injection risk — so the only bound arguments are
-	// the target name and the 7 d cutoff.
-	counts24 := make(map[string]map[checker.Outcome]int, len(targets))
-	counts7d := make(map[string]map[checker.Outcome]int, len(targets))
-	sum24 := make(map[string]int64, len(targets))
-	total24 := make(map[string]int, len(targets))
-	bucketCounts := make(map[string]map[int64]int, len(targets))
-	bucketSums := make(map[string]map[int64]int64, len(targets))
-
-	query := fmt.Sprintf(snapshotTargetAggregateQuery, durationCaseSQL(durationBucketBoundsMs), cutoff24h, cutoff24h)
-	for _, name := range targets {
-		if err := s.forEachRow(
-			query,
-			[]any{name, cutoff7d},
-			func(rows rowScanner) error {
-				var (
-					outcome string
-					upper   int64
-					count7  int
-					count24 int
-					sum24v  int64
-				)
-				if err := rows.Scan(&outcome, &upper, &count7, &count24, &sum24v); err != nil {
-					return err
-				}
-				if counts7d[name] == nil {
-					counts7d[name] = make(map[checker.Outcome]int)
-					counts24[name] = make(map[checker.Outcome]int)
-					bucketCounts[name] = make(map[int64]int)
-					bucketSums[name] = make(map[int64]int64)
-				}
-				counts7d[name][checker.Outcome(outcome)] += count7
-				counts24[name][checker.Outcome(outcome)] += count24
-				sum24[name] += sum24v
-				total24[name] += count24
-				// Buckets describe COMPLETED checks only: a skipped row never
-				// measured a duration (D30d).
-				if checker.Outcome(outcome) != checker.OutcomeSkipped {
-					bucketCounts[name][upper] += count24
-					bucketSums[name][upper] += sum24v
-				}
-				return nil
-			},
-		); err != nil {
-			return nil, fmt.Errorf("store: snapshot aggregate for %q: %w", name, err)
-		}
+	// 3) Every window aggregate in one merged index-range scan per target
+	// (snapshotAggregates — which the scale benchmark also measures on its
+	// own, so the aggregate portion's cost stays reproducible).
+	agg, err := s.snapshotAggregates(targets, cutoff24h, cutoff7d)
+	if err != nil {
+		return nil, err
 	}
 
 	// Fold the gathered rows into per-target Stats and uptimes. The zero
 	// snapshot seeded above supplies the full zero histogram, so every entry
 	// keeps the same shape whether or not it has data.
 	for name, entry := range out {
-		c24 := counts24[name]
+		c24 := agg.counts24[name]
 		entry.Stats.Up = c24[checker.OutcomeUp]
 		entry.Stats.Down = c24[checker.OutcomeDown]
 		entry.Stats.Timeout = c24[checker.OutcomeTimeout]
 		entry.Stats.Error = c24[checker.OutcomeError]
 		entry.Stats.Skipped = c24[checker.OutcomeSkipped]
-		if n := total24[name]; n > 0 {
-			entry.Stats.AvgDurationMs = int64(math.Round(float64(sum24[name]) / float64(n)))
+		if n := agg.total24[name]; n > 0 {
+			entry.Stats.AvgDurationMs = int64(math.Round(float64(agg.sum24[name]) / float64(n)))
 		}
 
 		cumulative := 0
 		for i := range entry.Stats.DurationBuckets {
 			upper := entry.Stats.DurationBuckets[i].UpperBoundMs
-			cumulative += bucketCounts[name][upper]
-			entry.Stats.DurationSumMs += bucketSums[name][upper]
+			cumulative += agg.bucketCounts[name][upper]
+			entry.Stats.DurationSumMs += agg.bucketSums[name][upper]
 			entry.Stats.DurationBuckets[i].Count = cumulative
 		}
 		if p50, ok := durationPercentile(entry.Stats.DurationBuckets, 0.50); ok {
@@ -193,7 +149,7 @@ func (s *Store) StatusSnapshot(targets []string) (map[string]TargetSnapshot, err
 		if percent, ok := uptimePercent(c24); ok {
 			entry.Uptime24h = &percent
 		}
-		if percent, ok := uptimePercent(counts7d[name]); ok {
+		if percent, ok := uptimePercent(agg.counts7d[name]); ok {
 			entry.Uptime7d = &percent
 		}
 		out[name] = entry
@@ -216,6 +172,75 @@ const snapshotTargetAggregateQuery = `SELECT outcome,
 	 FROM results
 	 WHERE target = ? AND started_at >= ?
 	 GROUP BY outcome, le_ms`
+
+// snapshotAggregates is the raw per-target aggregate the snapshot folds into
+// Stats and the uptimes; the scale benchmark measures this phase on its own.
+type snapshotAggregates struct {
+	counts24     map[string]map[checker.Outcome]int
+	counts7d     map[string]map[checker.Outcome]int
+	sum24        map[string]int64
+	total24      map[string]int
+	bucketCounts map[string]map[int64]int
+	bucketSums   map[string]map[int64]int64
+}
+
+// snapshotAggregates runs the merged per-target aggregate: one index-range scan
+// per target that produces the 24 h outcome counts, the 7 d outcome counts, the
+// 24 h duration buckets and sums, and the all-rows 24 h sum/count the average
+// needs (the average deliberately includes the 0 ms skipped rows, matching
+// Stats' historical semantics). The cutoffs are inlined as integer literals —
+// internal instants, no injection risk — so the only bound arguments are the
+// target name and the 7 d cutoff.
+func (s *Store) snapshotAggregates(targets []string, cutoff24h, cutoff7d int64) (snapshotAggregates, error) {
+	agg := snapshotAggregates{
+		counts24:     make(map[string]map[checker.Outcome]int, len(targets)),
+		counts7d:     make(map[string]map[checker.Outcome]int, len(targets)),
+		sum24:        make(map[string]int64, len(targets)),
+		total24:      make(map[string]int, len(targets)),
+		bucketCounts: make(map[string]map[int64]int, len(targets)),
+		bucketSums:   make(map[string]map[int64]int64, len(targets)),
+	}
+
+	query := fmt.Sprintf(snapshotTargetAggregateQuery, durationCaseSQL(durationBucketBoundsMs), cutoff24h, cutoff24h)
+	for _, name := range targets {
+		if err := s.forEachRow(
+			query,
+			[]any{name, cutoff7d},
+			func(rows rowScanner) error {
+				var (
+					outcome string
+					upper   int64
+					count7  int
+					count24 int
+					sum24v  int64
+				)
+				if err := rows.Scan(&outcome, &upper, &count7, &count24, &sum24v); err != nil {
+					return err
+				}
+				if agg.counts7d[name] == nil {
+					agg.counts7d[name] = make(map[checker.Outcome]int)
+					agg.counts24[name] = make(map[checker.Outcome]int)
+					agg.bucketCounts[name] = make(map[int64]int)
+					agg.bucketSums[name] = make(map[int64]int64)
+				}
+				agg.counts7d[name][checker.Outcome(outcome)] += count7
+				agg.counts24[name][checker.Outcome(outcome)] += count24
+				agg.sum24[name] += sum24v
+				agg.total24[name] += count24
+				// Buckets describe COMPLETED checks only: a skipped row never
+				// measured a duration (D30d).
+				if checker.Outcome(outcome) != checker.OutcomeSkipped {
+					agg.bucketCounts[name][upper] += count24
+					agg.bucketSums[name][upper] += sum24v
+				}
+				return nil
+			},
+		); err != nil {
+			return snapshotAggregates{}, fmt.Errorf("store: snapshot aggregate for %q: %w", name, err)
+		}
+	}
+	return agg, nil
+}
 
 // zeroStats returns the empty-window Stats: zero counts, a full zero histogram
 // (a bucket count of 0 is a real measurement), and no percentile estimates.

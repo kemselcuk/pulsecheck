@@ -147,11 +147,11 @@ func New(cfg config.Config, st *store.Store, version string, logger *slog.Logger
 	return mux
 }
 
-// handleStatus reports the configuration-ordered state of every target. One
-// batched snapshot (store.StatusSnapshot) supplies every target in a fixed
-// number of queries (D40); the whole payload is built before anything is
-// written, so a store failure still produces a clean 500 instead of a
-// truncated 200.
+// handleStatus reports the configuration-ordered state of every target through
+// store.StatusSnapshot — the measured read path (D40): one merged aggregate
+// scan per target instead of the previous four separate window scans. The whole
+// payload is built before anything is written, so a store failure still
+// produces a clean 500 instead of a truncated 200.
 func (s *apiServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if s.store == nil {
 		s.logger.Error("api: status requested without a store")

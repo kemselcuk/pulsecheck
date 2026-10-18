@@ -130,10 +130,10 @@ func (t targetSample) count(o checker.Outcome) int {
 // is a real measurement (no completed check fell in the bucket), so the
 // histogram is emitted with zeros instead of being omitted.
 //
-// The store is queried live per scrape through one batched snapshot (D40): the
-// scrape always reflects the database, at a fixed query cost independent of the
-// target count, while an in-process registry remains the documented future
-// option.
+// The store is queried live per scrape through the snapshot's measured read
+// path (D40): one merged aggregate scan per target plus bounded index reads, so
+// the scrape always reflects the database, while an in-process registry remains
+// the documented future option.
 func (s *server) render() (string, error) {
 	names := make([]string, 0, len(s.targets))
 	for _, t := range s.targets {
