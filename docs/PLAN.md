@@ -94,6 +94,8 @@
 
 ### Faz 4 — API + durum ekranı
 
+> **Durum:** ✅ Tamamlandı (2026-10-18) — implementer: `deepseek-v4.1-flash`; reviewer: `glm-5.3-flash` (APPROVE; 2 housekeeping minor → orkestratör: smoke cmd silindi, port pin'i + Atoi taşması düzeltildi). Canlı doğrulama: `demo-slow` skipped/timeout karışımı üretirken diğer hedefler kesintisiz — D4 gözle görülür.
+
 | Görev | İçerik | Kabul ölçütleri |
 |---|---|---|
 | **T4.1 JSON API** | `GET /api/status` (hedef başına son durum + 24 sa özet), `GET /api/history/{name}?limit=N`; yalnız stdlib `net/http` (Go 1.22 pattern routing), doğru hata kodları | httptest: `/api/status` şeması doğru; bilinmeyen hedef → 404; `limit` çalışır; hatalı yol → 404/405 |

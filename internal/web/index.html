@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PulseCheck</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #14171c;
+    --panel: #1d222a;
+    --border: #2c333d;
+    --text: #e6e9ee;
+    --muted: #98a2b3;
+    --up: #3fb950;
+    --down: #f85149;
+    --timeout: #d29922;
+    --skipped: #78828f;
+    --unknown: #4b535e;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 24px 16px 48px;
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  header {
+    max-width: 880px;
+    margin: 0 auto 20px;
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  h1 { margin: 0; font-size: 20px; letter-spacing: .2px; }
+  .updated { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+  .banner {
+    max-width: 880px;
+    margin: 0 auto 16px;
+    padding: 10px 14px;
+    border: 1px solid var(--down);
+    border-radius: 8px;
+    background: rgba(248, 81, 73, .12);
+    color: #ffb4ae;
+    font-size: 14px;
+  }
+  main { max-width: 880px; margin: 0 auto; display: grid; gap: 12px; }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 16px;
+  }
+  .card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .title { min-width: 0; }
+  .name { display: block; font-weight: 600; font-size: 15px; }
+  .url { display: block; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+  .badge {
+    flex: none;
+    padding: 3px 10px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: .4px;
+    color: #0d1117;
+  }
+  .badge.up { background: var(--up); }
+  .badge.down, .badge.error { background: var(--down); }
+  .badge.timeout { background: var(--timeout); }
+  .badge.skipped, .badge.unknown { background: var(--unknown); color: var(--text); }
+  .meta {
+    margin-top: 10px;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    color: var(--muted);
+    font-size: 13px;
+    font-variant-numeric: tabular-nums;
+  }
+  .meta .err { color: #ffb4ae; overflow-wrap: anywhere; }
+  .strip { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 3px; }
+  .dot { width: 9px; height: 9px; border-radius: 2px; display: inline-block; background: var(--unknown); }
+  .dot.up { background: var(--up); }
+  .dot.down, .dot.error { background: var(--down); }
+  .dot.timeout { background: var(--timeout); }
+  .dot.skipped { background: var(--skipped); }
+  .stats { margin-top: 8px; color: var(--muted); font-size: 13px; }
+  .empty { color: var(--muted); font-size: 13px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>PulseCheck</h1>
+  <span id="updated" class="updated">waiting for first update</span>
+</header>
+<div id="error" class="banner" hidden></div>
+<main id="targets"><p class="empty">Loading targets…</p></main>
+
+<script>
+(function () {
+  "use strict";
+
+  var POLL_MS = 5000;
+  var MAX_DOTS = 30;
+  var COUNTS = ["up", "down", "timeout", "error", "skipped"];
+
+  var targetsEl = document.getElementById("targets");
+  var updatedEl = document.getElementById("updated");
+  var errorEl = document.getElementById("error");
+
+  // Maps any outcome to a CSS class; unknown or missing outcomes stay neutral.
+  function klass(outcome) {
+    for (var i = 0; i < COUNTS.length; i++) {
+      if (outcome === COUNTS[i]) return outcome;
+    }
+    return "unknown";
+  }
+
+  function el(tag, className, text) {
+    var node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined && text !== null) node.textContent = String(text);
+    return node;
+  }
+
+  function formatTime(iso) {
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) return String(iso);
+    return d.toLocaleTimeString();
+  }
+
+  function renderStrip(recent) {
+    var strip = el("div", "strip");
+    if (!Array.isArray(recent) || recent.length === 0) {
+      strip.appendChild(el("span", "empty", "no checks yet"));
+      return strip;
+    }
+    recent.slice(0, MAX_DOTS).forEach(function (outcome) {
+      strip.appendChild(el("span", "dot " + klass(outcome)));
+    });
+    return strip;
+  }
+
+  function renderStats(stats) {
+    var s = stats && typeof stats === "object" ? stats : {};
+    var parts = [];
+    var total = 0;
+    COUNTS.forEach(function (key) {
+      var n = Number(s[key]);
+      if (!isFinite(n) || n <= 0) return;
+      total += n;
+      parts.push(n + " " + key);
+    });
+    if (total > 0) {
+      var avg = Number(s.avg_duration_ms);
+      if (isFinite(avg)) parts.push("avg " + avg + "ms");
+    }
+    return el("div", "stats", parts.length ? "24h: " + parts.join(" · ") : "24h: no data");
+  }
+
+  function renderCard(target) {
+    var t = target && typeof target === "object" ? target : {};
+    var card = el("section", "card");
+
+    var head = el("div", "card-head");
+    var title = el("div", "title");
+    title.appendChild(el("span", "name", t.name || "unnamed"));
+    title.appendChild(el("span", "url", t.url || ""));
+    head.appendChild(title);
+
+    var last = t.last && typeof t.last === "object" ? t.last : null;
+    var outcome = last && last.outcome ? String(last.outcome) : "";
+    head.appendChild(el("span", "badge " + klass(outcome), outcome || "pending"));
+    card.appendChild(head);
+
+    var meta = el("div", "meta");
+    meta.appendChild(el("span", null, "last: " + (last && last.at ? formatTime(last.at) : "never checked")));
+    if (last && isFinite(Number(last.duration_ms))) {
+      meta.appendChild(el("span", "sep", "·"));
+      meta.appendChild(el("span", null, Number(last.duration_ms) + " ms"));
+    }
+    if (last && Number(last.status_code) > 0) {
+      meta.appendChild(el("span", "sep", "·"));
+      meta.appendChild(el("span", null, "HTTP " + Number(last.status_code)));
+    }
+    if (last && last.error) {
+      meta.appendChild(el("span", "sep", "·"));
+      meta.appendChild(el("span", "err", String(last.error)));
+    }
+    card.appendChild(meta);
+
+    card.appendChild(renderStrip(t.recent));
+    card.appendChild(renderStats(t.stats));
+    return card;
+  }
+
+  function render(targets) {
+    targetsEl.textContent = "";
+    if (targets.length === 0) {
+      targetsEl.appendChild(el("p", "empty", "No targets configured."));
+      return;
+    }
+    targets.forEach(function (t) { targetsEl.appendChild(renderCard(t)); });
+  }
+
+  function showError(message) {
+    if (!message) {
+      errorEl.hidden = true;
+      errorEl.textContent = "";
+      return;
+    }
+    errorEl.hidden = false;
+    errorEl.textContent = message;
+  }
+
+  // refresh never throws: a network failure or an unexpected payload keeps the
+  // polling loop alive and surfaces in the banner instead.
+  function refresh() {
+    fetch("api/status", { headers: { Accept: "application/json" } })
+      .then(function (res) {
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        return res.json();
+      })
+      .then(function (data) {
+        if (!data || !Array.isArray(data.targets)) throw new Error("unexpected API shape");
+        render(data.targets);
+        showError("");
+        updatedEl.textContent = "updated " + new Date().toLocaleTimeString();
+      })
+      .catch(function (err) {
+        showError("API unreachable — retrying…" + (err && err.message ? " (" + err.message + ")" : ""));
+      });
+  }
+
+  refresh();
+  setInterval(refresh, POLL_MS);
+})();
+</script>
+</body>
+</html>

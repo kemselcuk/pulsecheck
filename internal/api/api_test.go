@@ -1,0 +1,471 @@
+package api
+
+import (
+	"encoding/json"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"pulsecheck/internal/checker"
+	"pulsecheck/internal/config"
+	"pulsecheck/internal/store"
+)
+
+// --- helpers -----------------------------------------------------------------
+
+// testLogger discards output so a failing store path does not spam the test log.
+func testLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+// newStore opens a real SQLite database under the test's temporary directory.
+// The returned store is closed on cleanup; tests that need a broken store close
+// it earlier (the extra Close is a no-op).
+func newStore(t *testing.T) *store.Store {
+	t.Helper()
+
+	s, err := store.Open(t.TempDir() + "/test.db")
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	return s
+}
+
+// newServer starts an httptest server around New and returns its base URL.
+func newServer(t *testing.T, cfg config.Config, st *store.Store) string {
+	t.Helper()
+
+	srv := httptest.NewServer(New(cfg, st, testLogger()))
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
+
+// target builds a config target with sane durations; only name and URL matter
+// to the API.
+func target(name, url string) config.Target {
+	return config.Target{Name: name, URL: url, Interval: time.Minute, Timeout: 5 * time.Second}
+}
+
+// seed records a result at the given age before now.
+func seed(t *testing.T, st *store.Store, name string, age time.Duration, r checker.Result) {
+	t.Helper()
+
+	r.TargetName = name
+	r.StartedAt = time.Now().Add(-age)
+	if err := st.RecordResult(r); err != nil {
+		t.Fatalf("RecordResult(%s, %s): %v", name, r.Outcome, err)
+	}
+}
+
+// getJSON performs GET path and decodes the body into out, returning the status
+// code and the raw body.
+func getJSON(t *testing.T, url string, out any) (int, []byte) {
+	t.Helper()
+
+	resp, err := http.Get(url)
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body of %s: %v", url, err)
+	}
+	if out != nil {
+		if err := json.Unmarshal(body, out); err != nil {
+			t.Fatalf("decode %s: %v (body: %s)", url, err, body)
+		}
+	}
+	return resp.StatusCode, body
+}
+
+// --- payload mirrors (independent of the production types) -------------------
+
+type jsonStatus struct {
+	CheckedAt string `json:"checked_at"`
+	Targets   []struct {
+		Name   string      `json:"name"`
+		URL    string      `json:"url"`
+		Last   *jsonResult `json:"last"`
+		Recent []string    `json:"recent"`
+		Stats  jsonStats   `json:"stats"`
+	} `json:"targets"`
+}
+
+type jsonResult struct {
+	Outcome    string `json:"outcome"`
+	StatusCode int    `json:"status_code"`
+	DurationMs int64  `json:"duration_ms"`
+	At         string `json:"at"`
+	Error      string `json:"error"`
+}
+
+type jsonStats struct {
+	Up            int   `json:"up"`
+	Down          int   `json:"down"`
+	Timeout       int   `json:"timeout"`
+	Error         int   `json:"error"`
+	Skipped       int   `json:"skipped"`
+	AvgDurationMs int64 `json:"avg_duration_ms"`
+}
+
+type errorPayload struct {
+	Error string `json:"error"`
+}
+
+// --- tests -------------------------------------------------------------------
+
+// TestStatusShape seeds three targets with a mixed outcome history and asserts
+// the whole /api/status payload: config order, URLs, the last result, the
+// newest-first recent strip capped at 30, and the 24h statistics.
+func TestStatusShape(t *testing.T) {
+	st := newStore(t)
+	cfg := config.Config{Targets: []config.Target{
+		target("alpha", "https://alpha.example/health"),
+		target("bravo", "https://bravo.example/health"),
+		target("charlie", "https://charlie.example/health"),
+	}}
+
+	// alpha: five distinct outcomes, newest first.
+	seed(t, st, "alpha", 1*time.Minute, checker.Result{Duration: 10 * time.Millisecond, Outcome: checker.OutcomeUp, StatusCode: 200})
+	seed(t, st, "alpha", 2*time.Minute, checker.Result{Duration: 20 * time.Millisecond, Outcome: checker.OutcomeDown, StatusCode: 503})
+	seed(t, st, "alpha", 3*time.Minute, checker.Result{Duration: 30 * time.Millisecond, Outcome: checker.OutcomeUp, StatusCode: 200})
+	seed(t, st, "alpha", 4*time.Minute, checker.Result{Outcome: checker.OutcomeSkipped, Err: "previous check still in flight"})
+	seed(t, st, "alpha", 5*time.Minute, checker.Result{Duration: 40 * time.Millisecond, Outcome: checker.OutcomeTimeout, Err: "context deadline exceeded"})
+
+	// bravo: 40 rows so the recent strip must be capped at 30.
+	for i := 1; i <= 40; i++ {
+		seed(t, st, "bravo", time.Duration(i)*time.Minute, checker.Result{
+			Duration: 5 * time.Millisecond, Outcome: checker.OutcomeUp, StatusCode: 200,
+		})
+	}
+
+	// charlie has no rows on purpose.
+
+	base := newServer(t, cfg, st)
+	var got jsonStatus
+	status, _ := getJSON(t, base+"/api/status", &got)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+
+	if _, err := time.Parse(time.RFC3339, got.CheckedAt); err != nil {
+		t.Errorf("checked_at = %q, not RFC3339: %v", got.CheckedAt, err)
+	}
+	if len(got.Targets) != 3 {
+		t.Fatalf("got %d targets, want 3", len(got.Targets))
+	}
+
+	// Config order and URLs.
+	wantNames := []string{"alpha", "bravo", "charlie"}
+	wantURLs := []string{
+		"https://alpha.example/health",
+		"https://bravo.example/health",
+		"https://charlie.example/health",
+	}
+	for i, want := range wantNames {
+		if got.Targets[i].Name != want {
+			t.Errorf("targets[%d].name = %q, want %q", i, got.Targets[i].Name, want)
+		}
+		if got.Targets[i].URL != wantURLs[i] {
+			t.Errorf("targets[%d].url = %q, want %q", i, got.Targets[i].URL, wantURLs[i])
+		}
+	}
+
+	// alpha: last result.
+	alpha := got.Targets[0]
+	if alpha.Last == nil {
+		t.Fatal("alpha.last = null, want the newest result")
+	}
+	if alpha.Last.Outcome != "up" {
+		t.Errorf("alpha.last.outcome = %q, want %q", alpha.Last.Outcome, "up")
+	}
+	if alpha.Last.StatusCode != 200 {
+		t.Errorf("alpha.last.status_code = %d, want 200", alpha.Last.StatusCode)
+	}
+	if alpha.Last.DurationMs != 10 {
+		t.Errorf("alpha.last.duration_ms = %d, want 10", alpha.Last.DurationMs)
+	}
+	if alpha.Last.Error != "" {
+		t.Errorf("alpha.last.error = %q, want empty", alpha.Last.Error)
+	}
+	if _, err := time.Parse(time.RFC3339, alpha.Last.At); err != nil {
+		t.Errorf("alpha.last.at = %q, not RFC3339: %v", alpha.Last.At, err)
+	}
+	// The newest alpha row is seeded one minute in the past, which also proves
+	// "at" tracks the row's timestamp rather than the server clock.
+	if at, _ := time.Parse(time.RFC3339, alpha.Last.At); time.Since(at) > 2*time.Minute {
+		t.Errorf("alpha.last.at = %v, want the newest row (~1 minute ago)", at)
+	}
+
+	// alpha: recent strip, newest first.
+	wantRecent := []string{"up", "down", "up", "skipped", "timeout"}
+	if len(alpha.Recent) != len(wantRecent) {
+		t.Fatalf("alpha.recent = %v, want %v", alpha.Recent, wantRecent)
+	}
+	for i, want := range wantRecent {
+		if alpha.Recent[i] != want {
+			t.Errorf("alpha.recent[%d] = %q, want %q", i, alpha.Recent[i], want)
+		}
+	}
+
+	// alpha: 24h stats. avg = (10+20+30+0+40)/5 = 20.
+	wantStats := jsonStats{Up: 2, Down: 1, Timeout: 1, Skipped: 1, AvgDurationMs: 20}
+	if alpha.Stats != wantStats {
+		t.Errorf("alpha.stats = %+v, want %+v", alpha.Stats, wantStats)
+	}
+
+	// bravo: recent capped at 30 even though 40 rows exist; stats count all 40.
+	bravo := got.Targets[1]
+	if len(bravo.Recent) != 30 {
+		t.Errorf("bravo.recent length = %d, want 30", len(bravo.Recent))
+	}
+	for i, o := range bravo.Recent {
+		if o != "up" {
+			t.Errorf("bravo.recent[%d] = %q, want %q", i, o, "up")
+			break
+		}
+	}
+	if bravo.Stats.Up != 40 || bravo.Stats.AvgDurationMs != 5 {
+		t.Errorf("bravo.stats = %+v, want 40 up with avg 5ms", bravo.Stats)
+	}
+	if bravo.Last == nil || bravo.Last.Outcome != "up" {
+		t.Errorf("bravo.last = %+v, want the newest up result", bravo.Last)
+	}
+}
+
+// TestStatusEmptyTarget asserts the no-rows representation: null last, empty
+// recent (not null), zero statistics.
+func TestStatusEmptyTarget(t *testing.T) {
+	st := newStore(t)
+	cfg := config.Config{Targets: []config.Target{target("idle", "https://idle.example/health")}}
+
+	base := newServer(t, cfg, st)
+	var got jsonStatus
+	status, body := getJSON(t, base+"/api/status", &got)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	if len(got.Targets) != 1 {
+		t.Fatalf("got %d targets, want 1", len(got.Targets))
+	}
+	ts := got.Targets[0]
+	if ts.Last != nil {
+		t.Errorf("last = %+v, want null", ts.Last)
+	}
+	if ts.Recent == nil {
+		t.Error("recent = null, want an empty array")
+	}
+	if len(ts.Recent) != 0 {
+		t.Errorf("recent = %v, want empty", ts.Recent)
+	}
+	if ts.Stats != (jsonStats{}) {
+		t.Errorf("stats = %+v, want zeros", ts.Stats)
+	}
+	// The raw JSON must say "recent":[] and "last":null, not the Go zero values.
+	if !strings.Contains(string(body), `"recent":[]`) || !strings.Contains(string(body), `"last":null`) {
+		t.Errorf("body = %s, want \"recent\":[] and \"last\":null", body)
+	}
+}
+
+// TestHistory seeds 600 rows and checks the default, explicit, capped, and
+// invalid limits plus the unknown-target 404.
+func TestHistory(t *testing.T) {
+	st := newStore(t)
+	cfg := config.Config{Targets: []config.Target{target("alpha", "https://alpha.example/health")}}
+
+	const rows = 600
+	for i := 1; i <= rows; i++ {
+		seed(t, st, "alpha", time.Duration(i)*time.Second, checker.Result{
+			Duration: time.Duration(i) * time.Millisecond, Outcome: checker.OutcomeUp, StatusCode: 200,
+		})
+	}
+
+	base := newServer(t, cfg, st)
+
+	// Default limit is 50, newest first.
+	var def []jsonResult
+	status, _ := getJSON(t, base+"/api/history/alpha", &def)
+	if status != http.StatusOK {
+		t.Fatalf("default status = %d, want 200", status)
+	}
+	if len(def) != 50 {
+		t.Fatalf("default returned %d rows, want 50", len(def))
+	}
+	// i=1 is the newest (age 1s), so duration_ms counts down from 1.
+	if def[0].DurationMs != 1 || def[49].DurationMs != 50 {
+		t.Errorf("default first/last duration = %d/%d, want 1/50 (newest first)", def[0].DurationMs, def[49].DurationMs)
+	}
+
+	// Explicit limit returns that many of the newest rows.
+	var five []jsonResult
+	status, _ = getJSON(t, base+"/api/history/alpha?limit=5", &five)
+	if status != http.StatusOK {
+		t.Fatalf("limit=5 status = %d, want 200", status)
+	}
+	if len(five) != 5 {
+		t.Fatalf("limit=5 returned %d rows, want 5", len(five))
+	}
+	for i, want := range []int64{1, 2, 3, 4, 5} {
+		if five[i].DurationMs != want {
+			t.Errorf("limit=5 row %d duration = %d, want %d", i, five[i].DurationMs, want)
+		}
+	}
+
+	// A limit above the maximum is capped at 500.
+	var capped []jsonResult
+	status, _ = getJSON(t, base+"/api/history/alpha?limit=9999", &capped)
+	if status != http.StatusOK {
+		t.Fatalf("limit=9999 status = %d, want 200", status)
+	}
+	if len(capped) != 500 {
+		t.Errorf("limit=9999 returned %d rows, want 500", len(capped))
+	}
+
+	// Absent, non-positive, and non-numeric limits all fall back to 50.
+	for _, q := range []string{"?limit=0", "?limit=-3", "?limit=abc"} {
+		var got []jsonResult
+		status, _ = getJSON(t, base+"/api/history/alpha"+q, &got)
+		if status != http.StatusOK {
+			t.Errorf("%s status = %d, want 200", q, status)
+			continue
+		}
+		if len(got) != 50 {
+			t.Errorf("%s returned %d rows, want the default 50", q, len(got))
+		}
+	}
+
+	// An integer too large to parse means "as many as allowed" and is capped.
+	var over []jsonResult
+	status, _ = getJSON(t, base+"/api/history/alpha?limit=99999999999999999999", &over)
+	if status != http.StatusOK {
+		t.Errorf("overflow limit status = %d, want 200", status)
+	} else if len(over) != 500 {
+		t.Errorf("overflow limit returned %d rows, want the cap 500", len(over))
+	}
+
+	// Unknown target: 404 with a JSON error. The name is unknown because config
+	// does not list it, even though it may match an empty result set.
+	var errBody errorPayload
+	status, _ = getJSON(t, base+"/api/history/nope", &errBody)
+	if status != http.StatusNotFound {
+		t.Errorf("unknown target status = %d, want 404", status)
+	}
+	if errBody.Error != "target not found" {
+		t.Errorf("unknown target error = %q, want %q", errBody.Error, "target not found")
+	}
+}
+
+// TestMethodNotAllowed asserts non-GET methods on known paths are answered with
+// a JSON 405.
+func TestMethodNotAllowed(t *testing.T) {
+	st := newStore(t)
+	cfg := config.Config{Targets: []config.Target{target("alpha", "https://alpha.example/health")}}
+	base := newServer(t, cfg, st)
+
+	for _, path := range []string{"/api/status", "/api/history/alpha"} {
+		resp, err := http.Post(base+path, "application/json", nil)
+		if err != nil {
+			t.Fatalf("POST %s: %v", path, err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		if resp.StatusCode != http.StatusMethodNotAllowed {
+			t.Errorf("POST %s status = %d, want 405", path, resp.StatusCode)
+		}
+		if ct := resp.Header.Get("Content-Type"); ct != "application/json" {
+			t.Errorf("POST %s Content-Type = %q, want application/json", path, ct)
+		}
+		var errBody errorPayload
+		if err := json.Unmarshal(body, &errBody); err != nil {
+			t.Errorf("POST %s body %q is not JSON: %v", path, body, err)
+		}
+		if errBody.Error != "method not allowed" {
+			t.Errorf("POST %s error = %q, want %q", path, errBody.Error, "method not allowed")
+		}
+	}
+}
+
+// TestUnknownPathIsNotFound documents that unrecognised paths keep the mux
+// default 404.
+func TestUnknownPathIsNotFound(t *testing.T) {
+	st := newStore(t)
+	base := newServer(t, config.Config{}, st)
+
+	resp, err := http.Get(base + "/api/unknown")
+	if err != nil {
+		t.Fatalf("GET /api/unknown: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", resp.StatusCode)
+	}
+}
+
+// TestStoreErrorPath closes the store and asserts the handlers degrade to a JSON
+// 500 instead of leaking or panicking.
+func TestStoreErrorPath(t *testing.T) {
+	st := newStore(t)
+	cfg := config.Config{Targets: []config.Target{target("alpha", "https://alpha.example/health")}}
+	if err := st.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	base := newServer(t, cfg, st)
+
+	for _, path := range []string{"/api/status", "/api/history/alpha"} {
+		var errBody errorPayload
+		status, body := getJSON(t, base+path, &errBody)
+		if status != http.StatusInternalServerError {
+			t.Errorf("GET %s status = %d, want 500", path, status)
+		}
+		if errBody.Error != "internal error" {
+			t.Errorf("GET %s error = %q, want %q", path, errBody.Error, "internal error")
+		}
+		// The internal detail must not reach the client.
+		if strings.Contains(string(body), "sql") || strings.Contains(string(body), "closed") {
+			t.Errorf("GET %s leaked internals: %s", path, body)
+		}
+	}
+}
+
+// TestNilStore covers the defensive guard for a missing store dependency.
+func TestNilStore(t *testing.T) {
+	base := newServer(t, config.Config{Targets: []config.Target{target("alpha", "https://a/")}}, nil)
+
+	var errBody errorPayload
+	status, _ := getJSON(t, base+"/api/status", &errBody)
+	if status != http.StatusInternalServerError || errBody.Error != "internal error" {
+		t.Errorf("/api/status = (%d, %q), want (500, \"internal error\")", status, errBody.Error)
+	}
+
+	status, _ = getJSON(t, base+"/api/history/alpha", &errBody)
+	if status != http.StatusInternalServerError || errBody.Error != "internal error" {
+		t.Errorf("/api/history/alpha = (%d, %q), want (500, \"internal error\")", status, errBody.Error)
+	}
+}
+
+// TestNilLogger covers the nil-logger fallback in New.
+func TestNilLogger(t *testing.T) {
+	st := newStore(t)
+	cfg := config.Config{Targets: []config.Target{target("alpha", "https://alpha.example/health")}}
+
+	srv := httptest.NewServer(New(cfg, st, nil))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/api/status")
+	if err != nil {
+		t.Fatalf("GET /api/status: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want 200", resp.StatusCode)
+	}
+}

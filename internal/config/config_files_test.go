@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -92,13 +93,23 @@ func TestDemoConfigLoads(t *testing.T) {
 	}
 
 	wantPaths := []string{"/ok", "/broken", "/slow"}
+	// demo-slow deliberately overrides its interval below the default timeout
+	// so live demo runs visibly produce 'skipped' records (decision D4).
+	wantIntervals := []time.Duration{10 * time.Second, 10 * time.Second, 3 * time.Second}
+	// The port is pinned so a revert to a commonly-colliding port (decision
+	// D23: 8081 is taken by unrelated dev tooling on real machines) cannot
+	// slip through the tests.
+	wantPrefix := "http://localhost:18081"
 	if len(cfg.Targets) != len(wantPaths) {
 		t.Fatalf("len(Targets) = %d, want %d demo targets", len(cfg.Targets), len(wantPaths))
 	}
 	for i, wantPath := range wantPaths {
 		target := cfg.Targets[i]
-		if target.Interval != 10*time.Second {
-			t.Errorf("targets[%d].Interval = %v, want 10s", i, target.Interval)
+		if target.Interval != wantIntervals[i] {
+			t.Errorf("targets[%d].Interval = %v, want %v", i, target.Interval, wantIntervals[i])
+		}
+		if !strings.HasPrefix(target.URL, wantPrefix) {
+			t.Errorf("targets[%d].URL = %q, want it to start with %q", i, target.URL, wantPrefix)
 		}
 		if target.Timeout != 5*time.Second {
 			t.Errorf("targets[%d].Timeout = %v, want the default 5s", i, target.Timeout)

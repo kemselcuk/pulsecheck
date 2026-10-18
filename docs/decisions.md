@@ -118,3 +118,8 @@ Bu günlük CV/görüşme kanıtıdır: her kararın *neden* seçildiği buradan
 - **Bağlam:** `checker.Recorder` interface'i hata dönüşü içermiyor; store'un hata bildiren yazım fonksiyonu da isteniyordu — Go overloading istemediği için tek imzayla ikisi yapılamaz.
 - **Karar:** `Record(Result)` interface'i karşılar (kalıcılık hatasını loglar), `RecordResult(Result) error` hata gereken çağıranlar için. Compile-time assertion: `var _ checker.Recorder = (*Store)(nil)`.
 - **Gerekçe:** Faz 2 interface'ini şimdi değiştirmek `MemoryRecorder` + scheduler'ı gereksiz yere sarsar; hata kanalına gerçek bir ihtiyaç doğarsa o zaman değiştirilir. `r.URL`'yi saklamama kararı da burada: hedefler config'den gelir, `target` doğal anahtar — saklasaydık config değişince bayat kopya sorunu doğardı. (Faz 3 review kararı.)
+
+### D23 — Demo portları geliştirici makinesindeki yaygın servislere çarpışmamalı
+- **Bağlam:** Bu makinede kullanıcının Docker hizmeti (mongo-express) `127.0.0.1:8081`'i tutuyordu; `demo-targets` IPv6 (::1) tarafına bağlandığından ilk koşum çalıştı ama süreç ölünce istekler IPv4'te Express'e düştü — tüm hedefler `down` oldu. Ek çevresel ders: varsayılan interval (10s) timeout'tan (5s) büyük olunca `skipped` davranışı canlıda asla görünmüyor.
+- **Karar:** Demo port `18081` (yaygın geliştirici portlarından uzak); `config.demo.json`'da `demo-slow` hedefi `interval: 3s` override'ı alıyor (timeout 5s > interval → in-flight skip'ler canlıda görünür). Doğrulama testi, hedef başına beklenen intervali pin'liyor.
+- **Gerekçe:** "Kolay yerel başlatma" vaadi, kullanıcının makinesinde zaten çalışan servislere çarpmamayı içerir; demo videosu (K10) da `skipped` kayıtlarını görünür kılmak zorunda. (Faz 4 canlı doğrulaması sırasında öğretildi, 2026-10-18.)
