@@ -18,10 +18,6 @@ import (
 )
 
 const (
-	// recentLimit is how many of the newest outcomes /api/status reports per
-	// target in its "recent" strip.
-	recentLimit = 30
-
 	// defaultHistoryLimit is the result count of /api/history when the limit
 	// query parameter is absent or not a positive integer.
 	defaultHistoryLimit = 50
@@ -29,14 +25,6 @@ const (
 	// maxHistoryLimit caps the result count of /api/history so a single request
 	// cannot pull an unbounded slice out of the database.
 	maxHistoryLimit = 500
-
-	// statsWindow is the look-back period of the per-target statistics.
-	statsWindow = 24 * time.Hour
-
-	// uptimeWindow24h and uptimeWindow7d are the look-back periods of the
-	// per-target uptime figures reported by /api/status.
-	uptimeWindow24h = 24 * time.Hour
-	uptimeWindow7d  = 7 * 24 * time.Hour
 
 	// genericErrorMessage is the only message ever sent to a client for an
 	// internal failure; the real error goes to the logger instead.
@@ -159,10 +147,25 @@ func New(cfg config.Config, st *store.Store, version string, logger *slog.Logger
 	return mux
 }
 
-// handleStatus reports the configuration-ordered state of every target.
+// handleStatus reports the configuration-ordered state of every target. One
+// batched snapshot (store.StatusSnapshot) supplies every target in a fixed
+// number of queries (D40); the whole payload is built before anything is
+// written, so a store failure still produces a clean 500 instead of a
+// truncated 200.
 func (s *apiServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if s.store == nil {
 		s.logger.Error("api: status requested without a store")
+		writeError(w, http.StatusInternalServerError, genericErrorMessage)
+		return
+	}
+
+	names := make([]string, 0, len(s.targets))
+	for _, t := range s.targets {
+		names = append(names, t.Name)
+	}
+	snap, err := s.store.StatusSnapshot(names)
+	if err != nil {
+		s.logger.Error("api: status snapshot", "err", err)
 		writeError(w, http.StatusInternalServerError, genericErrorMessage)
 		return
 	}
@@ -171,79 +174,32 @@ func (s *apiServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 		CheckedAt: time.Now().UTC().Format(time.RFC3339),
 		Targets:   make([]targetStatus, 0, len(s.targets)),
 	}
-	// Build the whole payload before writing anything so a mid-loop store
-	// failure can still produce a clean 500 instead of a truncated 200.
 	for _, t := range s.targets {
-		ts, err := s.targetStatus(t)
-		if err != nil {
-			s.logger.Error("api: build status", "target", t.Name, "err", err)
-			writeError(w, http.StatusInternalServerError, genericErrorMessage)
-			return
+		sn := snap[t.Name]
+		ts := targetStatus{Name: t.Name, URL: t.URL, Recent: make([]string, 0, len(sn.Recent))}
+		if sn.HasLatest {
+			view := newResultView(sn.Latest)
+			ts.Last = &view
 		}
+		for _, outcome := range sn.Recent {
+			ts.Recent = append(ts.Recent, string(outcome))
+		}
+		ts.Stats = statsView{
+			Up:            sn.Stats.Up,
+			Down:          sn.Stats.Down,
+			Timeout:       sn.Stats.Timeout,
+			Error:         sn.Stats.Error,
+			Skipped:       sn.Stats.Skipped,
+			AvgDurationMs: sn.Stats.AvgDurationMs,
+			P50DurationMs: sn.Stats.P50DurationMs,
+			P95DurationMs: sn.Stats.P95DurationMs,
+		}
+		ts.Uptime24h = sn.Uptime24h
+		ts.Uptime7d = sn.Uptime7d
 		resp.Targets = append(resp.Targets, ts)
 	}
 
 	writeJSON(w, http.StatusOK, resp)
-}
-
-// targetStatus assembles one target's entry. A target without rows yields a
-// null "last", an empty "recent", and zero statistics.
-func (s *apiServer) targetStatus(t config.Target) (targetStatus, error) {
-	ts := targetStatus{Name: t.Name, URL: t.URL, Recent: []string{}}
-
-	last, ok, err := s.store.Latest(t.Name)
-	if err != nil {
-		return targetStatus{}, err
-	}
-	if ok {
-		view := newResultView(last)
-		ts.Last = &view
-	}
-
-	history, err := s.store.History(t.Name, recentLimit)
-	if err != nil {
-		return targetStatus{}, err
-	}
-	for _, res := range history {
-		ts.Recent = append(ts.Recent, string(res.Outcome))
-	}
-
-	stats, err := s.store.Stats(t.Name, statsWindow)
-	if err != nil {
-		return targetStatus{}, err
-	}
-	ts.Stats = statsView{
-		Up:            stats.Up,
-		Down:          stats.Down,
-		Timeout:       stats.Timeout,
-		Error:         stats.Error,
-		Skipped:       stats.Skipped,
-		AvgDurationMs: stats.AvgDurationMs,
-		P50DurationMs: stats.P50DurationMs,
-		P95DurationMs: stats.P95DurationMs,
-	}
-
-	// Uptime is reported for two windows. hasData is false for an empty window
-	// (or one holding only skipped rows), which stays null rather than becoming
-	// a misleading 0%.
-	for _, u := range []struct {
-		window time.Duration
-		dst    **float64
-	}{
-		{uptimeWindow24h, &ts.Uptime24h},
-		{uptimeWindow7d, &ts.Uptime7d},
-	} {
-		percent, hasData, err := s.store.Uptime(t.Name, u.window)
-		if err != nil {
-			return targetStatus{}, err
-		}
-		if hasData {
-			value := percent
-			*u.dst = &value
-		}
-	}
-
-	return ts, nil
 }
 
 // handleHealthz reports process liveness plus the build version and how fresh

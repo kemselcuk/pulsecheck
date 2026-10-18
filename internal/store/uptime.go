@@ -17,6 +17,28 @@ const outcomeCountsQuery = `SELECT outcome, COUNT(*)
 	 WHERE target = ? AND started_at >= ?
 	 GROUP BY outcome`
 
+// uptimePercent turns outcome counts into the uptime percentage shared by
+// Uptime and the batched StatusSnapshot: the share of completed checks that
+// were up, as a percentage rounded to one decimal place. The skipped outcome is
+// deliberately EXCLUDED (decision D30d): a skipped row means no check ran — the
+// previous check was still in flight or the worker pool was saturated — so
+// counting it would score an unmeasured interval as an outage and make a busy
+// process look less available than it is. hasData is false when the window
+// holds no completed check, so callers distinguish "0% up" from "no
+// measurements".
+func uptimePercent(counts map[checker.Outcome]int) (percent float64, hasData bool) {
+	up := counts[checker.OutcomeUp]
+	completed := up +
+		counts[checker.OutcomeDown] +
+		counts[checker.OutcomeTimeout] +
+		counts[checker.OutcomeError]
+	if completed == 0 {
+		return 0, false
+	}
+
+	return math.Round(float64(up)/float64(completed)*1000) / 10, true
+}
+
 // Uptime reports the share of completed checks in the window ending now that
 // resulted in an up outcome, as a percentage rounded to one decimal place.
 //
@@ -39,16 +61,8 @@ func (s *Store) Uptime(target string, window time.Duration) (percent float64, ha
 		return 0, false, err
 	}
 
-	up := counts[checker.OutcomeUp]
-	completed := up +
-		counts[checker.OutcomeDown] +
-		counts[checker.OutcomeTimeout] +
-		counts[checker.OutcomeError]
-	if completed == 0 {
-		return 0, false, nil
-	}
-
-	return math.Round(float64(up)/float64(completed)*1000) / 10, true, nil
+	percent, hasData = uptimePercent(counts)
+	return percent, hasData, nil
 }
 
 // OutcomeCounts counts the stored checks of target per outcome over the window

@@ -21,16 +21,27 @@ const openBucketMs = math.MaxInt64
 // carry no duration (D30d consistency).
 var durationBucketsQuery = buildDurationBucketsQuery(durationBucketBoundsMs)
 
+// durationCaseSQL renders the CASE expression that maps a duration_ms value to
+// its bucket's upper bound; it is shared by the single-target histogram query
+// and the snapshot's merged per-target aggregate.
+func durationCaseSQL(bounds []int64) string {
+	var b strings.Builder
+	b.WriteString("CASE")
+	for _, ub := range bounds {
+		fmt.Fprintf(&b, " WHEN duration_ms <= %d THEN %d", ub, ub)
+	}
+	fmt.Fprintf(&b, " ELSE %d END", openBucketMs)
+	return b.String()
+}
+
 // buildDurationBucketsQuery renders the grouped histogram query: for every
 // non-empty bucket it returns the bucket's upper bound, the row count, and the
 // summed duration, in exactly the shape Stats consumes.
 func buildDurationBucketsQuery(bounds []int64) string {
 	var b strings.Builder
-	b.WriteString("SELECT CASE")
-	for _, ub := range bounds {
-		fmt.Fprintf(&b, " WHEN duration_ms <= %d THEN %d", ub, ub)
-	}
-	fmt.Fprintf(&b, " ELSE %d END AS upper_ms, COUNT(*), COALESCE(SUM(duration_ms), 0)", openBucketMs)
+	b.WriteString("SELECT ")
+	b.WriteString(durationCaseSQL(bounds))
+	b.WriteString(" AS upper_ms, COUNT(*), COALESCE(SUM(duration_ms), 0)")
 	b.WriteString(" FROM results WHERE target = ? AND started_at >= ? AND outcome != 'skipped' GROUP BY upper_ms")
 	return b.String()
 }
