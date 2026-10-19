@@ -277,7 +277,14 @@ func TestPprofMux(t *testing.T) {
 	srv := httptest.NewServer(pprofMux())
 	t.Cleanup(srv.Close)
 
-	for _, path := range []string{"/debug/pprof/", "/debug/pprof/cmdline", "/debug/pprof/goroutine?debug=1"} {
+	for _, path := range []string{
+		"/debug/pprof/",
+		"/debug/pprof/cmdline",
+		"/debug/pprof/goroutine?debug=1",
+		"/debug/pprof/symbol",
+		"/debug/pprof/profile?seconds=1",
+		"/debug/pprof/trace?seconds=1",
+	} {
 		resp, err := http.Get(srv.URL + path)
 		if err != nil {
 			t.Fatalf("GET %s: %v", path, err)
