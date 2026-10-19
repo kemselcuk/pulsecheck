@@ -290,7 +290,7 @@ All acceptance criteria above checked + the demo video embedded in the README + 
 
 # v1.2 Phase 7 — Nightly soak (user-approved 2026-10-19)
 
-> **Status:** ☐ Pending
+> **Status:** ✅ Implementation complete (2026-10-19) — the soak test is green in a short local run (maxRows 151, goroutines 6→6) and the retention binding is mutation-verified (SOAK_RETENTION=24h fails with the bound message); the workflow file is valid. Independent review, then a dispatch-run verification follows.
 
 | Task | Content | Acceptance criteria |
 |---|---|---|
