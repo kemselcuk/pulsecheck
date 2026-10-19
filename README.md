@@ -377,6 +377,7 @@ Which test proves which promise:
 | Batched snapshot equivalence + scale | `TestStatusSnapshotMatchesPerTargetQueries`, `BenchmarkStatusReadPaths` |
 | Zero-downtime reload (swap, in-flight continuity, rejection policy) | `TestSchedulerReload`, `TestReloadConfig`, `TestDiffTargets`, `TestAtomicConcurrentSwapLoad` |
 | Opt-in pprof on a dedicated mux (app never exposes it) | `TestPprofMux` + the route-table 404 case |
+| Soak: bounded rows under retention, goroutines return to baseline, reloads under load | `TestSoak` (`SOAK`-gated; run by the nightly workflow) |
 | Fuzz contract (no panic; config XOR error) | `FuzzParse` (seeds run with every `go test`; CI fuzzes 30 s) |
 
 From a real `go test -race -count=1 -v ./internal/checker/` run (relevant lines only):
@@ -435,6 +436,8 @@ fuzz: elapsed: 11s, execs: 443205 (9082/sec), new interesting: 12 (total: 400)
 PASS
 ok  	pulsecheck/internal/config	11.391s
 ```
+
+A **soak test** runs the whole stack — scheduler, SQLite store, retention and live reloads — for minutes and asserts that the row count stays bounded by the retention window and goroutines return to their baseline; the [nightly `soak.yml`](.github/workflows/soak.yml) workflow runs it for 3 minutes under `-race` (D45). Locally: `SOAK=1 SOAK_DURATION=30s go test -race -count=1 -run TestSoak ./internal/store/`.
 
 ## Profiling
 
