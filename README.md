@@ -65,24 +65,29 @@ The same demo comes up in two containers: `demo-targets` (reachable only inside 
 
 ## Releases
 
-Prebuilt binaries are published from git tags by [`release.yml`](.github/workflows/release.yml): static builds (`CGO_ENABLED=0`), `-trimpath`, the version injected from the tag name, with a sha256 `checksums.txt` alongside. The first release is **v1.0.0**:
+Prebuilt binaries are published from git tags by [`release.yml`](.github/workflows/release.yml): static builds (`CGO_ENABLED=0`), `-trimpath`, the version injected from the tag name, a sha256 `checksums.txt` alongside, and — since v1.1.0 — a **build provenance attestation** for every archive. The current release is **v1.1.0**:
 
 | Asset | Platform |
 |---|---|
-| `pulsecheck_v1.0.0_linux_amd64.tar.gz` | Linux, x86-64 (static) |
-| `pulsecheck_v1.0.0_linux_arm64.tar.gz` | Linux, arm64 (static) |
-| `pulsecheck_v1.0.0_darwin_arm64.tar.gz` | macOS, Apple silicon |
+| `pulsecheck_v1.1.0_linux_amd64.tar.gz` | Linux, x86-64 (static) |
+| `pulsecheck_v1.1.0_linux_arm64.tar.gz` | Linux, arm64 (static) |
+| `pulsecheck_v1.1.0_darwin_arm64.tar.gz` | macOS, Apple silicon |
+| `pulsecheck_v1.1.0_windows_amd64.tar.gz` | Windows, x86-64 (`pulsecheck.exe`) |
 
 ```console
-$ gh release download v1.0.0 --repo kemselcuk/pulsecheck --dir pulsecheck-v1.0.0
-$ cd pulsecheck-v1.0.0
+$ gh release download v1.1.0 --repo kemselcuk/pulsecheck --dir pulsecheck-v1.1.0
+$ cd pulsecheck-v1.1.0
 $ shasum -a 256 -c checksums.txt        # sha256sum on Linux
-pulsecheck_v1.0.0_darwin_arm64.tar.gz: OK
-pulsecheck_v1.0.0_linux_amd64.tar.gz: OK
-pulsecheck_v1.0.0_linux_arm64.tar.gz: OK
-$ tar -xzf pulsecheck_v1.0.0_darwin_arm64.tar.gz
-$ ./pulsecheck -config path/to/config.json        # any PulseCheck config file
+pulsecheck_v1.1.0_darwin_arm64.tar.gz: OK
+pulsecheck_v1.1.0_linux_amd64.tar.gz: OK
+pulsecheck_v1.1.0_linux_arm64.tar.gz: OK
+pulsecheck_v1.1.0_windows_amd64.tar.gz: OK
+$ tar -xzf pulsecheck_v1.1.0_darwin_arm64.tar.gz
+$ ./pulsecheck -version
+pulsecheck v1.1.0
 ```
+
+Every archive is attested: `gh attestation verify <archive> -R kemselcuk/pulsecheck` proves the artifact was built by this repository's release workflow from the tagged commit — no signing keys involved (D44).
 
 Local builds inject the version explicitly — `make build` defaults to `dev`, and the value flows into the startup log, `/healthz` and `/metrics`:
 
