@@ -272,7 +272,7 @@ All acceptance criteria above checked + the demo video embedded in the README + 
 
 # v1.2 Phase 5 — pprof, opt-in (user-approved 2026-10-19)
 
-> **Status:** ✅ Implementation complete (2026-10-19); independent review and merge follow.
+> **Status:** ✅ Complete (2026-10-19) — implementation + independent review (APPROVE; the reviewer reproduced the live two-port scenario, the bind-failure startup error, and the flag-off connection refusal). Findings closed: 1 nit (the mux test now exercises all five mounts, including `profile`/`symbol`/`trace`); 3 observations kept (the fatal-path exit matches the pre-existing pattern, `DefaultServeMux` is registered-but-never-served, README heap values are single-run captures).
 
 | Task | Content | Acceptance criteria |
 |---|---|---|
