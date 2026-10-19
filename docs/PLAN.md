@@ -290,7 +290,7 @@ All acceptance criteria above checked + the demo video embedded in the README + 
 
 # v1.2 Phase 7 — Nightly soak (user-approved 2026-10-19)
 
-> **Status:** ✅ Implementation complete (2026-10-19) — the soak test is green in short local runs (maxRows 151, goroutines 6→6, reproduced exactly by the reviewer) and the retention binding is mutation-verified (SOAK_RETENTION=24h fails with the bound message and nothing else); the reviewer also confirmed the SKIP stays fast and the workflow YAML is sound. Findings closed: 1 minor (a floor assertion now catches a recording regression that would otherwise pass at zero rows) and 2 nits (`-count=1` in the README command, a concurrency guard on the workflow); 4 observations kept. The dispatch-run verification lands in the phase's closing record.
+> **Status:** ✅ Complete (2026-10-19) — the soak test is green in short local runs (maxRows 151, goroutines 6→6, reproduced exactly by the reviewer) and the retention binding is mutation-verified (SOAK_RETENTION=24h fails with the bound message and nothing else); the reviewer also confirmed the SKIP stays fast and the workflow YAML is sound. Findings closed: 1 minor (a floor assertion now catches a recording regression that would otherwise pass at zero rows) and 2 nits (`-count=1` in the README command, a concurrency guard on the workflow); 4 observations kept. Dispatch-run verification: `soak.yml` run `39180731785` green on main — a full 3-minute soak under `-race`, maxRows 151, goroutines 6→6, identical to the local evidence; the nightly cron now owns it.
 
 | Task | Content | Acceptance criteria |
 |---|---|---|
