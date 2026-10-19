@@ -121,8 +121,11 @@ func TestSoak(t *testing.T) {
 
 	// Rows arrive at roughly (3 targets / 60ms + 1 extra / 100ms) ≈ 60/s; the
 	// 2s design window holds ≈ 120; the bound leaves a 3x margin. Without
-	// pruning, a 15s run already exceeds it by far.
+	// pruning, a 15s run already exceeds it by far. The floor proves the other
+	// direction: a regression that silently stopped recording would otherwise
+	// pass the upper bound at zero rows.
 	maxAllowed := int64(400)
+	minRequired := int64(50)
 	var maxRows int64
 
 	rowCount := func() int64 {
@@ -204,6 +207,9 @@ loop:
 
 	if maxRows > maxAllowed {
 		t.Errorf("row count peaked at %d, bound is %d: the retention window (%v) is not pruning (SOAK_RETENTION is for mutation checks only)", maxRows, maxAllowed, retention)
+	}
+	if maxRows < minRequired {
+		t.Errorf("row count peaked at only %d, floor is %d: the stack is not exercising the store", maxRows, minRequired)
 	}
 	t.Logf("soak done: duration=%v retention=%v maxRows=%d goroutines baseline=%d after=%d", duration, retention, maxRows, baseline, after)
 }

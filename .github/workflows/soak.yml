@@ -6,6 +6,11 @@ on:
     - cron: '23 2 * * *'
   workflow_dispatch:
 
+# A nightly run and a manual dispatch must never overlap.
+concurrency:
+  group: soak
+  cancel-in-progress: false
+
 jobs:
   soak:
     runs-on: ubuntu-latest

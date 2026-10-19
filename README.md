@@ -437,7 +437,7 @@ PASS
 ok  	pulsecheck/internal/config	11.391s
 ```
 
-A **soak test** runs the whole stack — scheduler, SQLite store, retention and live reloads — for minutes and asserts that the row count stays bounded by the retention window and goroutines return to their baseline; the [nightly `soak.yml`](.github/workflows/soak.yml) workflow runs it for 3 minutes under `-race` (D45). Locally: `SOAK=1 SOAK_DURATION=30s go test -race -run TestSoak ./internal/store/`.
+A **soak test** runs the whole stack — scheduler, SQLite store, retention and live reloads — for minutes and asserts that the row count stays bounded by the retention window and goroutines return to their baseline; the [nightly `soak.yml`](.github/workflows/soak.yml) workflow runs it for 3 minutes under `-race` (D45). Locally: `SOAK=1 SOAK_DURATION=30s go test -race -count=1 -run TestSoak ./internal/store/`.
 
 ## Profiling
 
