@@ -280,7 +280,7 @@ All acceptance criteria above checked + the demo video embedded in the README + 
 
 # v1.2 Phase 6 — Release hardening: Windows + provenance (user-approved 2026-10-19)
 
-> **Status:** ☐ Pending
+> **Status:** ✅ Implementation complete (2026-10-19) — the pipeline changes are dry-run locally (four targets, a PE32+ `pulsecheck.exe`, checksums verified); independent review, then the `v1.1.0` tag and its end-to-end verification follow.
 
 | Task | Content | Acceptance criteria |
 |---|---|---|

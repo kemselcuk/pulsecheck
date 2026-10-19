@@ -5,8 +5,12 @@ on:
     tags:
       - 'v*'
 
+# contents: publish the release; id-token and attestations: mint the build
+# provenance attestations for every artifact (D44).
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 jobs:
   release:
@@ -32,18 +36,27 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          for target in linux/amd64 linux/arm64 darwin/arm64; do
+          for target in linux/amd64 linux/arm64 darwin/arm64 windows/amd64; do
             goos="${target%%/*}"
             goarch="${target##*/}"
+            binary="pulsecheck"
+            if [ "${goos}" = "windows" ]; then
+              binary="pulsecheck.exe"
+            fi
             name="pulsecheck_${VERSION}_${goos}_${goarch}"
             CGO_ENABLED=0 GOOS="${goos}" GOARCH="${goarch}" go build \
               -trimpath -ldflags "-s -w -X main.version=${VERSION}" \
-              -o "dist/${name}/pulsecheck" ./cmd/pulsecheck
-            tar -C "dist/${name}" -czf "dist/${name}.tar.gz" pulsecheck
+              -o "dist/${name}/${binary}" ./cmd/pulsecheck
+            tar -C "dist/${name}" -czf "dist/${name}.tar.gz" "${binary}"
             rm -rf "dist/${name}"
           done
           (cd dist && sha256sum *.tar.gz > checksums.txt)
           ls -l dist
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v4.2.2
+        with:
+          subject-path: 'dist/*.tar.gz'
 
       - name: Publish GitHub release
         env:
