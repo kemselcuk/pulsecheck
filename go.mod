@@ -2,7 +2,7 @@ module pulsecheck
 
 go 1.27
 
-require modernc.org/sqlite v1.60.1
+require modernc.org/sqlite v1.61.0
 
 require (
 	github.com/dustin/go-humanize v1.1.0 // indirect
